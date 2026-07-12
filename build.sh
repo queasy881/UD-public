@@ -12,6 +12,6 @@ esac
 echo "Compiling UD -> $OUT"
 "$CC" -std=c11 -O2 -ffunction-sections -fdata-sections \
       -fno-asynchronous-unwind-tables -fno-unwind-tables \
-      -o "$OUT" *.c -s -Wl,--gc-sections
+      -Isrc -o "$OUT" src/*.c -s -Wl,--gc-sections
 
 echo "Done: $OUT ($(wc -c < "$OUT") bytes)"

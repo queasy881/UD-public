@@ -8,16 +8,17 @@
 
 $ErrorActionPreference = "Stop"
 
-$Repo   = "https://github.com/queasy881/UD-public.git"
-$Prefix = if ($env:UD_PREFIX) { $env:UD_PREFIX } else { Join-Path $env:USERPROFILE ".ud" }
-$BinDir = Join-Path $Prefix "bin"
+$Repo     = "https://github.com/queasy881/UD-public.git"
+$Prefix   = if ($env:UD_PREFIX) { $env:UD_PREFIX } else { Join-Path $env:USERPROFILE ".ud" }
+$BinDir   = Join-Path $Prefix "bin"
+$AssetDir = Join-Path $Prefix "assets"
 
 function Say  ($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Warn ($m) { Write-Host "!!  $m" -ForegroundColor Yellow }
 function Die  ($m) { Write-Host "xx  $m" -ForegroundColor Red; exit 1 }
 
 # --- 1. locate or fetch the source ------------------------------------------
-if ((Test-Path "main.c") -and (Test-Path "vm.c") -and (Test-Path "build.bat")) {
+if ((Test-Path "src/main.c") -and (Test-Path "src/vm.c") -and (Test-Path "build.bat")) {
     $Src = (Get-Location).Path
     Say "Building from the current directory: $Src"
 } else {
@@ -36,20 +37,28 @@ if (-not (Get-Command $cc -ErrorAction SilentlyContinue)) {
 }
 Say "Compiling the interpreter"
 Push-Location $Src
-$srcs = (Get-ChildItem *.c).Name
+$srcDir = Join-Path $Src "src"
+$srcs = (Get-ChildItem (Join-Path $srcDir "*.c")).FullName
 $gccArgs = @(
     "-std=c11", "-O2", "-ffunction-sections", "-fdata-sections",
     "-fno-asynchronous-unwind-tables", "-fno-unwind-tables",
+    "-I", $srcDir,
     "-o", "ud.exe"
 ) + $srcs + @("-s", "-Wl,--gc-sections")
 & $cc @gccArgs
 if ($LASTEXITCODE -ne 0) { Pop-Location; Die "the build failed." }
 Pop-Location
 
-# --- 3. install the binary ---------------------------------------------------
+# --- 3. install the binary and icons -----------------------------------------
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 Copy-Item -Force (Join-Path $Src "ud.exe") (Join-Path $BinDir "ud.exe")
 Say "Installed $BinDir\ud.exe"
+
+New-Item -ItemType Directory -Force -Path $AssetDir | Out-Null
+foreach ($ico in @("ud-source.ico", "ud-bytecode.ico")) {
+    $from = Join-Path $Src "assets\$ico"
+    if (Test-Path $from) { Copy-Item -Force $from (Join-Path $AssetDir $ico) }
+}
 
 # --- 4. put it on the user PATH ---------------------------------------------
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -61,17 +70,32 @@ if (($userPath -split ";") -notcontains $BinDir) {
     Say "Added $BinDir to your user PATH"
 }
 
-# --- 5. associate .ud files (per-user registry, no admin) -------------------
-$exe = Join-Path $BinDir "ud.exe"
-New-Item -Path "HKCU:\Software\Classes\.ud" -Force | Out-Null
-Set-ItemProperty -Path "HKCU:\Software\Classes\.ud" -Name "(default)" -Value "UD.Script"
-New-Item -Path "HKCU:\Software\Classes\UD.Script\shell\open\command" -Force | Out-Null
-Set-ItemProperty -Path "HKCU:\Software\Classes\UD.Script" -Name "(default)" -Value "UD source file"
-Set-ItemProperty -Path "HKCU:\Software\Classes\UD.Script\shell\open\command" -Name "(default)" -Value "`"$exe`" `"%1`" %*"
-Say "Associated .ud files with ud.exe"
+# --- 5. associate .ud and .ldx files (per-user registry, no admin) ----------
+$exe          = Join-Path $BinDir "ud.exe"
+$IconSource   = Join-Path $AssetDir "ud-source.ico"
+$IconBytecode = Join-Path $AssetDir "ud-bytecode.ico"
+
+function Register-UDType($ext, $progid, $desc, $command, $icon) {
+    New-Item -Path "HKCU:\Software\Classes\$ext" -Force | Out-Null
+    Set-ItemProperty -Path "HKCU:\Software\Classes\$ext" -Name "(default)" -Value $progid
+    New-Item -Path "HKCU:\Software\Classes\$progid" -Force | Out-Null
+    Set-ItemProperty -Path "HKCU:\Software\Classes\$progid" -Name "(default)" -Value $desc
+    New-Item -Path "HKCU:\Software\Classes\$progid\DefaultIcon" -Force | Out-Null
+    Set-ItemProperty -Path "HKCU:\Software\Classes\$progid\DefaultIcon" -Name "(default)" -Value $icon
+    New-Item -Path "HKCU:\Software\Classes\$progid\shell\open\command" -Force | Out-Null
+    Set-ItemProperty -Path "HKCU:\Software\Classes\$progid\shell\open\command" -Name "(default)" -Value $command
+}
+
+# .ud runs the source; .ldx runs the compiled program (works for thin + standalone).
+Register-UDType ".ud"  "UD.Script"   "UD source file"      "`"$exe`" `"%1`" %*"      $IconSource
+Register-UDType ".ldx" "UD.Bytecode" "UD compiled program" "`"$exe`" run `"%1`" %*"  $IconBytecode
+Say "Associated .ud and .ldx files (with icons)"
+
+# nudge Explorer to pick up the new icons
+try { & "$env:SystemRoot\System32\ie4uinit.exe" -show 2>$null } catch {}
 
 # --- 6. install the VS Code extension ----------------------------------------
-$vsSrc = Join-Path $Src "vscode-ud"
+$vsSrc = Join-Path $Src "editor\vscode"
 if (Test-Path $vsSrc) {
     foreach ($root in @("$env:USERPROFILE\.vscode\extensions", "$env:USERPROFILE\.vscode-insiders\extensions")) {
         $base = Split-Path $root -Parent

@@ -11,13 +11,14 @@ set -eu
 REPO="https://github.com/queasy881/UD-public.git"
 PREFIX="${UD_PREFIX:-$HOME/.ud}"
 BIN_DIR="$PREFIX/bin"
+ASSET_DIR="$PREFIX/assets"
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 
 # --- 1. locate or fetch the source ------------------------------------------
-if [ -f main.c ] && [ -f vm.c ] && [ -f build.sh ]; then
+if [ -f src/main.c ] && [ -f src/vm.c ] && [ -f build.sh ]; then
     SRC_DIR="$(pwd)"
     say "Building from the current directory: $SRC_DIR"
 else
@@ -46,6 +47,11 @@ cp -f "$SRC_DIR/$EXE" "$BIN_DIR/$EXE"
 chmod +x "$BIN_DIR/$EXE"
 say "Installed $BIN_DIR/$EXE"
 
+mkdir -p "$ASSET_DIR"
+for asset in ud-source.ico ud-bytecode.ico ud-source.png ud-bytecode.png; do
+    [ -f "$SRC_DIR/assets/$asset" ] && cp -f "$SRC_DIR/assets/$asset" "$ASSET_DIR/$asset"
+done
+
 # --- 4. put it on PATH -------------------------------------------------------
 add_path_line='export PATH="'"$BIN_DIR"':$PATH"'
 added=0
@@ -62,10 +68,13 @@ if [ "$added" -eq 0 ]; then
     say "Added $BIN_DIR to PATH in $HOME/.profile"
 fi
 
-# --- 5. associate .ud files (best effort, desktop Linux) ---------------------
+# --- 5. associate .ud and .ldx files (best effort, desktop Linux) -----------
 if command -v xdg-mime >/dev/null 2>&1 && [ -d "$HOME/.local/share" ]; then
-    mimedir="$HOME/.local/share/mime/packages"
-    mkdir -p "$mimedir"
+    share="$HOME/.local/share"
+    mimedir="$share/mime/packages"
+    appdir="$share/applications"
+    mkdir -p "$mimedir" "$appdir"
+
     cat > "$mimedir/ud.xml" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
@@ -73,19 +82,57 @@ if command -v xdg-mime >/dev/null 2>&1 && [ -d "$HOME/.local/share" ]; then
     <comment>UD source file</comment>
     <glob pattern="*.ud"/>
   </mime-type>
+  <mime-type type="application/x-ud-bytecode">
+    <comment>UD compiled program</comment>
+    <glob pattern="*.ldx"/>
+  </mime-type>
 </mime-info>
 XML
-    update-mime-database "$HOME/.local/share/mime" >/dev/null 2>&1 || true
-    say "Registered the .ud file type"
+    update-mime-database "$share/mime" >/dev/null 2>&1 || true
+
+    # .ud opens the source; .ldx runs the compiled program. Console apps, so Terminal=true.
+    cat > "$appdir/ud-source.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=UD
+Exec=$BIN_DIR/$EXE %f
+Icon=text-x-ud
+MimeType=text/x-ud;
+NoDisplay=true
+Terminal=true
+EOF
+    cat > "$appdir/ud-bytecode.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=UD (run compiled)
+Exec=$BIN_DIR/$EXE run %f
+Icon=application-x-ud-bytecode
+MimeType=application/x-ud-bytecode;
+NoDisplay=true
+Terminal=true
+EOF
+    update-desktop-database "$appdir" >/dev/null 2>&1 || true
+    xdg-mime default ud-source.desktop text/x-ud >/dev/null 2>&1 || true
+    xdg-mime default ud-bytecode.desktop application/x-ud-bytecode >/dev/null 2>&1 || true
+
+    if command -v xdg-icon-resource >/dev/null 2>&1; then
+        [ -f "$SRC_DIR/assets/ud-source.png" ] && xdg-icon-resource install \
+            --context mimetypes --size 256 "$SRC_DIR/assets/ud-source.png" \
+            text-x-ud >/dev/null 2>&1 || true
+        [ -f "$SRC_DIR/assets/ud-bytecode.png" ] && xdg-icon-resource install \
+            --context mimetypes --size 256 "$SRC_DIR/assets/ud-bytecode.png" \
+            application-x-ud-bytecode >/dev/null 2>&1 || true
+    fi
+    say "Registered the .ud and .ldx file types"
 fi
 
 # --- 6. install the VS Code extension ----------------------------------------
-if [ -d "$SRC_DIR/vscode-ud" ]; then
+if [ -d "$SRC_DIR/editor/vscode" ]; then
     for extroot in "$HOME/.vscode/extensions" "$HOME/.vscode-insiders/extensions"; do
         base="$(dirname "$extroot")"
         [ -d "$base" ] || continue
         mkdir -p "$extroot/ud-lang"
-        cp -R "$SRC_DIR/vscode-ud/." "$extroot/ud-lang/"
+        cp -R "$SRC_DIR/editor/vscode/." "$extroot/ud-lang/"
         say "Installed the VS Code extension into $extroot/ud-lang"
     done
 fi

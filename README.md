@@ -13,9 +13,10 @@ end
 
 - **Fast.** Source compiles straight to bytecode and runs on a stack VM that uses
   computed-goto dispatch on GCC/Clang. No tree-walking.
-- **One VM, three ways to run.** Interpret a script, compile it to a portable
-  `.ldx` bytecode file, or run a `.ldx` — all through the exact same VM.
-- **Tiny.** The whole `ud` binary is ~120 KB.
+- **One VM, every way to run.** Interpret a script, compile it to a portable
+  `.ldx` bytecode file, run a `.ldx`, or build a **standalone `.ldx`** that runs
+  on its own with no `ud` installed — all through the exact same VM.
+- **Tiny.** The whole `ud` binary is ~130 KB.
 - **Friendly failures.** Every error is numbered with a one-line plain-language
   reason. UD never shows you a raw C crash or a segfault.
 
@@ -44,7 +45,7 @@ make examples     # build + run every example
 ```sh
 gcc -std=c11 -O2 -ffunction-sections -fdata-sections \
     -fno-asynchronous-unwind-tables -fno-unwind-tables \
-    -o ud *.c -s -Wl,--gc-sections
+    -Isrc -o ud src/*.c -s -Wl,--gc-sections
 ```
 
 To put `ud` on your PATH everywhere (and associate `.ud` files + install the
@@ -54,25 +55,46 @@ VS Code extension), use the bootstrap installer described in **Installing** belo
 
 ## Running
 
-UD has three modes, all sharing one compiler and one VM:
+Everything shares one compiler and one VM:
 
 | Command | What it does |
 |---|---|
 | `ud file.ud` | compile in memory and run |
-| `ud build file.ud [-o out.ldx]` | compile to portable `.ldx` bytecode |
-| `ud run file.ldx` | run a compiled `.ldx` |
+| `ud build file.ud [-o out.ldx]` | compile to a **standalone** `.ldx` that runs on its own |
+| `ud build file.ud --thin` | compile to a portable `.ldx` (needs `ud run`) |
+| `ud run file.ldx` | run a compiled `.ldx` (thin or standalone) |
 | `ud --version` | print the version |
 | `ud --help` | show usage |
 
 ```sh
 ud examples/fizzbuzz.ud
-ud build examples/fib.ud -o fib.ldx
-ud run fib.ldx
+ud build examples/fib.ud -o fib.ldx   # standalone: fib.ldx runs by itself
+ud run fib.ldx                        # ...and is still a normal .ldx
 ```
 
-A `.ldx` holds only bytecode, constants, and type tags — never your source. It is
-a little-endian container that runs unchanged on any platform, and it **cannot be
-turned back into readable UD or C**.
+A `.ldx` holds only bytecode, constants, and type tags — never your source, so it
+**cannot be turned back into readable UD or C**.
+
+### Standalone vs. thin `.ldx`
+
+`ud build` produces a **standalone** `.ldx` by default: the portable bytecode with
+a full copy of the `ud` runtime fused in front of it. The result is *also* a native
+executable, so it runs on a machine with no `ud` installed — double-click it, or
+rename it to `.exe` and run it — while **still being a valid `.ldx`** that `ud run`
+accepts. (On Linux/macOS `chmod +x` is set for you; the payload is placed after the
+executable, which the OS ignores.)
+
+Pass `--thin` when you'd rather have the small, cross-platform payload on its own.
+A thin `.ldx` is a handful of bytes and runs on any platform, but only through
+`ud run`. A standalone `.ldx` is bigger (it carries the ~130 KB runtime) and is
+tied to the platform it was built on.
+
+| | standalone (default) | `--thin` |
+|---|---|---|
+| Runs on its own | yes | no — needs `ud run` |
+| `ud run` works | yes | yes |
+| Cross-platform | no (native to the build OS) | yes |
+| Size | payload + ~130 KB runtime | just the payload |
 
 ---
 
@@ -335,8 +357,9 @@ ud examples/loops.ud
 
 ## Installing
 
-The bootstrap installer builds `ud`, puts it on your PATH, associates `.ud`
-files, and installs the VS Code extension:
+The bootstrap installer builds `ud`, puts it on your PATH, gives `.ud` and `.ldx`
+files their icons and associations (double-click a `.ud` to run it, a `.ldx` to
+run the compiled program), and installs the VS Code extension:
 
 ```sh
 # Linux / macOS / MSYS2
@@ -350,6 +373,17 @@ Run `ud --version` afterward to confirm the install.
 
 ---
 
+## Project layout
+
+```
+src/            the language: lexer, parser, compiler, VM, serializer, CLI
+examples/       runnable .ud programs
+editor/vscode/  the VS Code extension (syntax highlighting)
+assets/         the .ud / .ldx icons (and the script that draws them)
+build.sh · build.bat · Makefile   three ways to build the same binary
+install.sh · install.ps1          bootstrap installers
+```
+
 ## How it fits together
 
 ```
@@ -357,12 +391,17 @@ source.ud ─► lexer ─► parser ─► compiler ─► bytecode ─┬─�
                                                        │
                                           serialize ◄──┘
                                               │
-                                          file.ldx ─► VM ─► output
+                                    ┌─────────┴───────────┐
+                                thin .ldx           standalone .ldx
+                                (payload)      (ud runtime + payload)
+                                    │                     │
+                                 ud run              runs on its own
+                                    └────────► VM ◄────────┘
 ```
 
 One lexer, one parser, one compiler, one VM. `build` just stops after the
 compiler and writes the bytecode to disk; `run` reads it straight back into the
-same VM.
+same VM. A standalone `.ldx` carries a copy of that VM with it.
 
 ## License
 

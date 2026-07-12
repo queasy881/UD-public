@@ -9,8 +9,8 @@ CFLAGS  ?= -std=c11 -O2 -ffunction-sections -fdata-sections \
            -fno-asynchronous-unwind-tables -fno-unwind-tables
 LDFLAGS ?= -s -Wl,--gc-sections
 
-SRC := $(wildcard *.c)
-HDR := $(wildcard *.h)
+SRC := $(wildcard src/*.c)
+HDR := $(wildcard src/*.h)
 BIN := ud
 
 ifeq ($(OS),Windows_NT)
@@ -21,7 +21,7 @@ endif
 RUNNABLE := $(filter-out examples/input.ud,$(wildcard examples/*.ud))
 
 $(BIN): $(SRC) $(HDR)
-	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
+	$(CC) $(CFLAGS) -Isrc -o $@ $(SRC) $(LDFLAGS)
 	@echo "Built $@"
 
 .PHONY: examples clean

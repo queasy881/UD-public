@@ -1,10 +1,16 @@
 /* main.c -- the `ud` command line.
  *
- * Three ways to run UD, all sharing one compiler and one VM:
+ * Ways to run UD, all sharing one compiler and one VM:
  *
  *   ud file.ud               lex -> parse -> compile -> run (in memory)
- *   ud build file.ud -o x    lex -> parse -> compile -> serialize to .ldx
+ *   ud build file.ud         compile to a standalone .ldx that runs on its own
+ *   ud build file.ud --thin  compile to a portable .ldx (needs `ud run`)
  *   ud run file.ldx          load .ldx -> run
+ *
+ * And one more that takes no subcommand: when the running executable is itself a
+ * standalone .ldx (a `ud` runtime with a program fused on -- see serialize.c),
+ * it just runs that embedded program. That is how a built .ldx "runs on its own"
+ * with no `ud` installed.
  *
  * A single setjmp() here is the landing pad for every ud_error(): any failure,
  * compile-time or runtime, prints its numbered report and unwinds to main,
@@ -21,8 +27,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+
+#ifdef _WIN32
+#  include <windows.h>
+#elif defined(__APPLE__)
+#  include <mach-o/dyld.h>
+#else
+#  include <unistd.h>
+#endif
 
 #define UD_VERSION_STRING "UD 1.0.0"
+
+/* Absolute path to the running executable, so a fused .ldx can read its own
+ * bytes back. Falls back to argv[0] if the OS query fails. */
+static const char *self_path(const char *argv0) {
+    static char buf[4096];
+#ifdef _WIN32
+    DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)sizeof(buf));
+    if (n > 0 && n < sizeof(buf)) return buf;
+#elif defined(__APPLE__)
+    uint32_t sz = (uint32_t)sizeof(buf);
+    if (_NSGetExecutablePath(buf, &sz) == 0) return buf;
+#else
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) { buf[n] = '\0'; return buf; }
+#endif
+    return argv0;
+}
 
 static int usage(FILE *out) {
     fprintf(out,
@@ -30,7 +62,8 @@ static int usage(FILE *out) {
         "\n"
         "Usage:\n"
         "  ud <file.ud>                    compile and run a UD program\n"
-        "  ud build <file.ud> [-o out.ldx] compile to portable .ldx bytecode\n"
+        "  ud build <file.ud> [-o out]     compile to a standalone .ldx (runs on its own)\n"
+        "  ud build <file.ud> --thin       compile to a portable .ldx (needs `ud run`)\n"
         "  ud run <file.ldx>               run a compiled .ldx program\n"
         "  ud --version                    print the version\n"
         "  ud --help                       show this help\n"
@@ -97,6 +130,20 @@ int main(int argc, char **argv) {
         return err;
     }
 
+    /* If this very executable is a standalone .ldx, run its fused program and
+     * ignore the command line -- that is what makes a built .ldx self-run. The
+     * ordinary `ud` binary isn't fused, so it falls through to the CLI. */
+    const char *self = self_path(argv[0]);
+    if (ud_serialize_is_standalone(self)) {
+        struct ud_program prog;
+        ud_program_init(&prog);
+        ud_register_builtins(&prog);
+        ud_serialize_read(&prog, self);
+        int ec = ud_vm_run(&prog);
+        ud_heap_shutdown();
+        return ec;
+    }
+
     if (argc < 2) { int c = usage(stderr); ud_heap_shutdown(); return c; }
 
     const char *cmd = argv[1];
@@ -110,8 +157,10 @@ int main(int argc, char **argv) {
         if (argc < 3) { int c = usage(stderr); ud_heap_shutdown(); return c; }
         const char *src_path = argv[2];
         const char *out_path = NULL;
+        int thin = 0;
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out_path = argv[++i];
+            else if (strcmp(argv[i], "--thin") == 0 || strcmp(argv[i], "-t") == 0) thin = 1;
             else { int c = usage(stderr); ud_heap_shutdown(); return c; }
         }
         char *derived = NULL;
@@ -120,8 +169,13 @@ int main(int argc, char **argv) {
         ud_program_init(&prog);
         ud_register_builtins(&prog);
         compile_file(src_path, &prog);
-        ud_serialize_write(&prog, out_path);
-        printf("Built %s\n", out_path);
+        if (thin) {
+            ud_serialize_write(&prog, out_path);
+            printf("Built %s (portable .ldx -- run with `ud run`)\n", out_path);
+        } else {
+            ud_serialize_write_standalone(&prog, out_path, self);
+            printf("Built %s (standalone .ldx -- runs on its own)\n", out_path);
+        }
         free(derived);
     } else if (strcmp(cmd, "run") == 0) {
         if (argc < 3) { int c = usage(stderr); ud_heap_shutdown(); return c; }

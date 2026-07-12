@@ -28,6 +28,19 @@
  * Constants only ever hold ints, floats and strings (the compiler never emits
  * function/array/struct literals into a chunk), but nil/bool tags are handled
  * for completeness.
+ *
+ * A .ldx comes in two shapes that share the exact same payload:
+ *
+ *   thin       [UDLX payload]
+ *   standalone [ud runtime executable][UDLX payload][u64 offset LE]["UDLXFUSE"]
+ *
+ * The thin form is portable (the same bytes run on any platform via `ud run`).
+ * The standalone form prepends a full copy of the native `ud` runtime, so the
+ * file is *also* a valid executable that runs its own embedded payload with no
+ * `ud` installed -- while still being a .ldx that `ud run` accepts (the reader
+ * spots the trailer and skips to the payload). The 16-byte trailer makes the
+ * two round-trippable: the offset says where the payload starts, the magic
+ * marks the file as fused.
  */
 #include "serialize.h"
 #include "errors.h"
@@ -37,8 +50,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define LDX_MAGIC   "UDLX"
-#define LDX_VERSION 1u
+#ifndef _WIN32
+#include <sys/stat.h> /* chmod the standalone output executable */
+#endif
+
+#define LDX_MAGIC      "UDLX"
+#define LDX_VERSION    1u
+#define LDX_FUSE_MAGIC "UDLXFUSE" /* 8-byte trailer tag on a standalone .ldx */
 
 /* ------------------------------------------------------------------ */
 /* Writing                                                            */
@@ -60,10 +78,10 @@ static void w_str(FILE *f, struct ud_string *s) {
     if (s->length) fwrite(s->chars, 1, (size_t)s->length, f);
 }
 
-void ud_serialize_write(struct ud_program *prog, const char *path) {
-    FILE *f = fopen(path, "wb");
-    if (!f) ud_error(UDE_IO, 0, "could not open '%s' for writing", path);
-
+/* Write just the portable UDLX payload to an already-open stream. Shared by the
+ * thin and standalone writers -- the only difference between the two formats is
+ * what surrounds this payload. */
+static void write_payload(FILE *f, struct ud_program *prog) {
     fwrite(LDX_MAGIC, 1, 4, f);
     w_u32(f, LDX_VERSION);
     w_u32(f, (uint32_t)prog->function_count);
@@ -118,8 +136,58 @@ void ud_serialize_write(struct ud_program *prog, const char *path) {
         }
     }
 
+}
+
+/* Thin .ldx: nothing but the portable payload. */
+void ud_serialize_write(struct ud_program *prog, const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) ud_error(UDE_IO, 0, "could not open '%s' for writing", path);
+    write_payload(f, prog);
     if (ferror(f)) { fclose(f); ud_error(UDE_IO, 0, "failed while writing '%s'", path); }
     fclose(f);
+}
+
+/* Standalone .ldx: a full copy of the `ud` runtime at `runtime_path`, then the
+ * payload, then a 16-byte trailer (u64 payload offset + "UDLXFUSE"). The result
+ * self-executes yet is still a valid .ldx. If `runtime_path` is itself a fused
+ * .ldx we copy only its runtime half, so re-fusing never nests payloads. */
+void ud_serialize_write_standalone(struct ud_program *prog, const char *path,
+                                   const char *runtime_path) {
+    FILE *rf = fopen(runtime_path, "rb");
+    if (!rf) ud_error(UDE_IO, 0, "could not open the UD runtime '%s'", runtime_path);
+    fseek(rf, 0, SEEK_END);
+    long rsz = ftell(rf);
+    fseek(rf, 0, SEEK_SET);
+    if (rsz <= 0) { fclose(rf); ud_error(UDE_IO, 0, "the UD runtime '%s' is empty", runtime_path); }
+    uint8_t *rbuf = (uint8_t *)malloc((size_t)rsz);
+    if (!rbuf) { fclose(rf); ud_error(UDE_INTERNAL, 0, "out of memory"); }
+    size_t rgot = fread(rbuf, 1, (size_t)rsz, rf);
+    fclose(rf);
+
+    /* Strip an existing fuse so we copy only the clean runtime bytes. */
+    size_t runtime_len = rgot;
+    if (rgot >= 16 && memcmp(rbuf + rgot - 8, LDX_FUSE_MAGIC, 8) == 0) {
+        uint64_t off = 0;
+        for (int i = 0; i < 8; i++) off |= (uint64_t)rbuf[rgot - 16 + i] << (8 * i);
+        if (off <= (uint64_t)(rgot - 16)) runtime_len = (size_t)off;
+    }
+
+    FILE *f = fopen(path, "wb");
+    if (!f) { free(rbuf); ud_error(UDE_IO, 0, "could not open '%s' for writing", path); }
+    fwrite(rbuf, 1, runtime_len, f);
+    free(rbuf);
+
+    write_payload(f, prog);
+
+    w_u64(f, (uint64_t)runtime_len);
+    fwrite(LDX_FUSE_MAGIC, 1, 8, f);
+
+    if (ferror(f)) { fclose(f); ud_error(UDE_IO, 0, "failed while writing '%s'", path); }
+    fclose(f);
+
+#ifndef _WIN32
+    chmod(path, 0755); /* the payload alone isn't runnable; the whole file is */
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -178,7 +246,16 @@ void ud_serialize_read(struct ud_program *prog, const char *path) {
     struct reader r;
     r.p = buf; r.end = buf + got; r.owned = buf;
 
-    if (got < 8 || memcmp(r.p, LDX_MAGIC, 4) != 0)
+    /* Standalone .ldx? Skip the prepended runtime and land on the payload. */
+    if (got >= 16 && memcmp(buf + got - 8, LDX_FUSE_MAGIC, 8) == 0) {
+        uint64_t off = 0;
+        for (int i = 0; i < 8; i++) off |= (uint64_t)buf[got - 16 + i] << (8 * i);
+        if (off > (uint64_t)(got - 16)) r_fail(&r, "this .ldx file has a corrupt fuse trailer");
+        r.p   = buf + off;
+        r.end = buf + got - 16;
+    }
+
+    if ((r.end - r.p) < 8 || memcmp(r.p, LDX_MAGIC, 4) != 0)
         r_fail(&r, "this is not a UD .ldx file");
     r.p += 4;
     if (r_u32(&r) != LDX_VERSION)
@@ -253,4 +330,16 @@ void ud_serialize_read(struct ud_program *prog, const char *path) {
     prog->entry = prog->functions[entry_idx];
 
     free(buf);
+}
+
+/* True if `path` is a standalone (fused) .ldx -- i.e. the running executable is
+ * carrying its own embedded program. Any read failure just means "no". */
+int ud_serialize_is_standalone(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    if (fseek(f, -8L, SEEK_END) != 0) { fclose(f); return 0; }
+    char tail[8];
+    size_t got = fread(tail, 1, 8, f);
+    fclose(f);
+    return got == 8 && memcmp(tail, LDX_FUSE_MAGIC, 8) == 0;
 }

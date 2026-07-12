@@ -5,6 +5,7 @@
     "version": "1.0.0",
     "publisher": "ud",
     "license": "MIT",
+    "icon": "icon.png",
     "engines": { "vscode": "^1.60.0" },
     "categories": ["Programming Languages"],
     "main": "./extension.js",
