@@ -1,0 +1,21 @@
+-- operators.ud -- arithmetic, power, bitwise, and comparisons.
+-- Note: int / int gives an int (truncated); use floats for real division.
+
+int function entry()
+    cout("7 + 3   = " .. (7 + 3))
+    cout("7 - 3   = " .. (7 - 3))
+    cout("7 * 3   = " .. (7 * 3))
+    cout("7 / 3   = " .. (7 / 3))      -- integer division -> 2
+    cout("7 % 3   = " .. (7 % 3))
+    cout("2 ** 10 = " .. (2 ** 10))    -- power
+    cout("7.0/2.0 = " .. (7.0 / 2.0))  -- real division -> 3.5
+
+    cout("5 & 3   = " .. (5 & 3))      -- bitwise and
+    cout("5 | 3   = " .. (5 | 3))      -- bitwise or
+    cout("5 ^ 3   = " .. (5 ^ 3))      -- bitwise xor
+    cout("1 << 4  = " .. (1 << 4))     -- shift left
+
+    bool ok = 3 < 5 and 5 >= 5
+    cout("logic   = " .. ok)
+    return 0
+end

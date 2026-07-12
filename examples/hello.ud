@@ -1,0 +1,8 @@
+-- hello.ud -- the smallest UD program.
+-- Every UD program starts at `int function entry()`, like main() in C.
+-- The value entry() returns becomes the process exit code.
+
+int function entry()
+    cout("Hello from UD!")
+    return 0
+end

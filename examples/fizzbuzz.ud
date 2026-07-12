@@ -1,0 +1,17 @@
+-- fizzbuzz.ud -- classic FizzBuzz, 1 to 20.
+-- Shows for-range loops, if/elseif/else with `then`, and the modulo operator.
+
+int function entry()
+    for i = 1, 20 do
+        if i % 15 == 0 then
+            cout("FizzBuzz")
+        elseif i % 3 == 0 then
+            cout("Fizz")
+        elseif i % 5 == 0 then
+            cout("Buzz")
+        else
+            cout(i)
+        end
+    end
+    return 0
+end

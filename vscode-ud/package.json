@@ -1,0 +1,60 @@
+{
+    "name": "ud-lang",
+    "displayName": "UD Language",
+    "description": "Syntax highlighting and a one-click Run button for the UD programming language.",
+    "version": "1.0.0",
+    "publisher": "ud",
+    "license": "MIT",
+    "engines": { "vscode": "^1.60.0" },
+    "categories": ["Programming Languages"],
+    "main": "./extension.js",
+    "activationEvents": ["onLanguage:ud", "onCommand:ud.run", "onCommand:ud.build"],
+    "contributes": {
+        "languages": [
+            {
+                "id": "ud",
+                "aliases": ["UD", "ud"],
+                "extensions": [".ud"],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "ud",
+                "scopeName": "source.ud",
+                "path": "./syntaxes/ud.tmLanguage.json"
+            }
+        ],
+        "commands": [
+            {
+                "command": "ud.run",
+                "title": "UD: Run File",
+                "icon": "$(play)"
+            },
+            {
+                "command": "ud.build",
+                "title": "UD: Build to .ldx"
+            }
+        ],
+        "menus": {
+            "editor/title/run": [
+                {
+                    "when": "resourceLangId == ud",
+                    "command": "ud.run",
+                    "group": "navigation@1"
+                }
+            ],
+            "commandPalette": [
+                { "command": "ud.run", "when": "resourceLangId == ud" },
+                { "command": "ud.build", "when": "resourceLangId == ud" }
+            ]
+        },
+        "keybindings": [
+            {
+                "command": "ud.run",
+                "key": "f5",
+                "when": "resourceLangId == ud && editorTextFocus"
+            }
+        ]
+    }
+}

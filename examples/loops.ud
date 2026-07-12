@@ -1,0 +1,35 @@
+-- loops.ud -- every loop UD offers, including the custom while...unless.
+
+int function entry()
+    -- classic while: test runs BEFORE each pass
+    int i = 0
+    while i < 5 do
+        cout("while i = " .. i)
+        i += 1
+    end
+
+    -- while...unless: the body always runs first, THEN `unless` is checked.
+    -- The loop exits the instant the unless-condition becomes true.
+    int n = 0
+    while true do
+        cout("unless n = " .. n)
+        n += 1
+    unless n >= 3 end
+
+    -- for-range with a step
+    for k = 0, 10, 2 do
+        cout("step k = " .. k)
+    end
+
+    -- break and continue work in every loop
+    for j = 1, 10 do
+        if j % 2 == 0 then
+            continue          -- skip even numbers
+        end
+        if j > 7 then
+            break             -- stop once we pass 7
+        end
+        cout("odd j = " .. j)
+    end
+    return 0
+end

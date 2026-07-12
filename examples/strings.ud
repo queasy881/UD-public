@@ -1,0 +1,20 @@
+-- strings.ud -- the string toolkit.
+-- Concatenate with `..` (it turns any value into text); `+` is numbers only.
+
+int function entry()
+    string s = "  Hello, World  "
+    cout("trimmed:  [" .. s.trim() .. "]")
+    cout("upper:    " .. s.upper())
+    cout("lower:    " .. s.lower())
+    cout("replaced: " .. s.replace("World", "UD"))
+    cout("length:   " .. len(s.trim()))
+    cout("find llo: " .. "Hello".find("llo"))
+
+    -- split gives back a dynamic array; join glues one back together
+    string csv = "red,green,blue"
+    parts = csv.split(",")
+    cout("parts:    " .. parts)
+    cout("count:    " .. len(parts))
+    cout("joined:   " .. parts.join(" | "))
+    return 0
+end

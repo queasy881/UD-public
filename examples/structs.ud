@@ -1,0 +1,26 @@
+-- structs.ud -- group related values into a named record.
+-- Fields are typed. Build one by calling the struct like a function.
+
+struct Point
+    float x
+    float y
+end
+
+-- Struct values are passed as untyped parameters (a, b) and used by field.
+float function dist2(a, b)
+    float dx = a.x - b.x
+    float dy = a.y - b.y
+    return dx * dx + dy * dy
+end
+
+int function entry()
+    p = Point(0.0, 0.0)
+    q = Point(3.0, 4.0)
+    cout("p = " .. p)
+    cout("q = " .. q)
+
+    q.x = 6.0                     -- fields are mutable
+    cout("moved q = " .. q)
+    cout("dist^2  = " .. dist2(p, q))
+    return 0
+end

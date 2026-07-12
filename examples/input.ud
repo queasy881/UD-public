@@ -1,0 +1,19 @@
+-- input.ud -- reading typed input with cin.
+-- The declared type decides how cin validates what the user types:
+--   int a   = cin(...)  errors on words or decimals (8.5 is rejected)
+--   float f = cin(...)  accepts 8 or 8.5, promotes whole numbers to float
+--   string s = cin(...) accepts anything at all
+--   bool b  = cin(...)  accepts true/false/1/0
+-- The prompt argument is optional: cin() reads a line with no prompt.
+
+int function entry()
+    string name = cin("What is your name? ")
+    cout("Hello, " .. name .. "!")
+
+    int age = cin("How old are you? ")
+    cout("Next year you will be " .. (age + 1))
+
+    float temp = cin("Temperature in Celsius? ")
+    cout("That is " .. (temp * 9.0 / 5.0 + 32.0) .. " F")
+    return 0
+end

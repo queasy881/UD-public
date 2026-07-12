@@ -1,0 +1,11 @@
+# Build artifacts
+*.o
+*.obj
+ud
+ud.exe
+*.ldx
+
+# Editor / OS cruft
+.vscode/
+.DS_Store
+Thumbs.db

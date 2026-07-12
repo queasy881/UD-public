@@ -1,0 +1,25 @@
+-- arrays.ud -- dynamic arrays: append, index, slice, iterate, pop.
+-- Arrays have no type keyword, so declare them with a plain assignment.
+
+int function entry()
+    nums = [10, 20, 30]
+    nums.append(40)
+    nums.append(50)
+
+    cout("array:  " .. nums)
+    cout("length: " .. len(nums))
+    cout("first:  " .. nums[0])
+    cout("last:   " .. nums[-1])       -- negative indexes count from the end
+    cout("slice:  " .. nums[1:3])      -- Python-style [start:stop)
+
+    int total = 0
+    for n in nums do
+        total += n
+    end
+    cout("sum:    " .. total)
+
+    popped = nums.pop()
+    cout("popped: " .. popped)
+    cout("now:    " .. nums)
+    return 0
+end

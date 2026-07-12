@@ -1,0 +1,76 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "UD",
+    "scopeName": "source.ud",
+    "patterns": [
+        { "include": "#comments" },
+        { "include": "#strings" },
+        { "include": "#numbers" },
+        { "include": "#function-def" },
+        { "include": "#keywords" },
+        { "include": "#builtins" },
+        { "include": "#operators" }
+    ],
+    "repository": {
+        "comments": {
+            "patterns": [
+                { "match": "(--|//).*$", "name": "comment.line.ud" }
+            ]
+        },
+        "strings": {
+            "patterns": [
+                {
+                    "name": "string.quoted.double.ud",
+                    "begin": "\"",
+                    "end": "\"",
+                    "patterns": [
+                        { "match": "\\\\.", "name": "constant.character.escape.ud" }
+                    ]
+                },
+                {
+                    "name": "string.quoted.single.ud",
+                    "begin": "'",
+                    "end": "'",
+                    "patterns": [
+                        { "match": "\\\\.", "name": "constant.character.escape.ud" }
+                    ]
+                }
+            ]
+        },
+        "numbers": {
+            "patterns": [
+                { "match": "\\b[0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?\\b", "name": "constant.numeric.float.ud" },
+                { "match": "\\b[0-9]+([eE][+-]?[0-9]+)?\\b", "name": "constant.numeric.integer.ud" }
+            ]
+        },
+        "function-def": {
+            "patterns": [
+                {
+                    "match": "\\b(function)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+                    "captures": {
+                        "1": { "name": "keyword.control.ud" },
+                        "2": { "name": "entity.name.function.ud" }
+                    }
+                }
+            ]
+        },
+        "keywords": {
+            "patterns": [
+                { "match": "\\b(if|then|elseif|else|end|while|do|unless|for|in|return|break|continue|function|struct)\\b", "name": "keyword.control.ud" },
+                { "match": "\\b(and|or|not)\\b", "name": "keyword.operator.word.ud" },
+                { "match": "\\b(true|false|nil)\\b", "name": "constant.language.ud" },
+                { "match": "\\b(int|float|bool|string)\\b", "name": "storage.type.ud" }
+            ]
+        },
+        "builtins": {
+            "patterns": [
+                { "match": "\\b(cout|cin|len|type)\\b", "name": "support.function.builtin.ud" }
+            ]
+        },
+        "operators": {
+            "patterns": [
+                { "match": "\\*\\*|\\.\\.|==|!=|<=|>=|<<|>>|\\+=|-=|\\*=|/=|%=|&&|\\|\\||[-+*/%=<>&|^~!]", "name": "keyword.operator.ud" }
+            ]
+        }
+    }
+}
