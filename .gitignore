@@ -4,6 +4,7 @@
 ud
 ud.exe
 *.ldx
+*.vsix
 
 # Editor / OS cruft
 .vscode/

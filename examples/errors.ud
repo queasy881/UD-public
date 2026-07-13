@@ -1,0 +1,37 @@
+-- Structured error handling: try / catch / throw.
+
+-- Validates a percentage, throwing its own error when out of range.
+function parse_percent(s)
+    n = int(s)
+    if n < 0 or n > 100 then
+        throw "out of range: " .. n
+    end
+    return n
+end
+
+int function entry()
+    -- A runtime error (division by zero) is catchable as a message.
+    try
+        x = 10 / 0
+        cout("unreachable " .. x)
+    catch (e)
+        cout("caught runtime: " .. e)
+    end
+
+    -- throw raises your own error; catch (name) binds it.
+    for s in ["50", "150", "20"] do
+        try
+            cout(s .. " -> " .. parse_percent(s))
+        catch (e)
+            cout(s .. " rejected: " .. e)
+        end
+    end
+
+    -- A thrown value keeps its type, so this int stays usable as a number.
+    try
+        throw 404
+    catch (code)
+        cout("code doubled: " .. (code * 2))
+    end
+    return 0
+end

@@ -47,6 +47,9 @@ static int keyword_type(const char *s, int len) {
         {"nil", T_NIL}, {"true", T_TRUE}, {"false", T_FALSE},
         {"int", T_KW_INT}, {"float", T_KW_FLOAT},
         {"bool", T_KW_BOOL}, {"string", T_KW_STRING},
+        {"const", T_CONST}, {"enum", T_ENUM},
+        {"try", T_TRY}, {"catch", T_CATCH}, {"throw", T_THROW},
+        {"require", T_REQUIRE},
         {NULL, 0}
     };
     for (int i = 0; kws[i].kw; i++) {
@@ -109,6 +112,19 @@ struct ud_token *ud_lex(const char *src, int *out_count) {
             while (*lx.cur && *lx.cur != '\n') lx.cur++;
             continue;
         }
+        /* block comments: /* ... *​/  (nestable) */
+        if (c == '/' && lx.cur[1] == '*') {
+            lx.cur += 2;
+            int depth = 1;
+            while (*lx.cur && depth > 0) {
+                if (lx.cur[0] == '/' && lx.cur[1] == '*') { depth++; lx.cur += 2; }
+                else if (lx.cur[0] == '*' && lx.cur[1] == '/') { depth--; lx.cur += 2; }
+                else { if (*lx.cur == '\n') lx.line++; lx.cur++; }
+            }
+            if (depth > 0)
+                ud_error(UDE_SYNTAX, lx.line, "a /* block comment was never closed");
+            continue;
+        }
 
         if (c == '\0') { push_tok(&lx, T_EOF, lx.cur, 0); break; }
 
@@ -134,8 +150,11 @@ struct ud_token *ud_lex(const char *src, int *out_count) {
             case ')' : push_tok(&lx, T_RPAREN, s, 1); lx.cur++; break;
             case '[' : push_tok(&lx, T_LBRACK, s, 1); lx.cur++; break;
             case ']' : push_tok(&lx, T_RBRACK, s, 1); lx.cur++; break;
+            case '{' : push_tok(&lx, T_LBRACE, s, 1); lx.cur++; break;
+            case '}' : push_tok(&lx, T_RBRACE, s, 1); lx.cur++; break;
             case ',' : push_tok(&lx, T_COMMA, s, 1); lx.cur++; break;
             case ':' : push_tok(&lx, T_COLON, s, 1); lx.cur++; break;
+            case '?' : push_tok(&lx, T_QUESTION, s, 1); lx.cur++; break;
             case '~' : push_tok(&lx, T_TILDE, s, 1); lx.cur++; break;
             case '^' : push_tok(&lx, T_CARET, s, 1); lx.cur++; break;
             case '.' :
@@ -144,6 +163,7 @@ struct ud_token *ud_lex(const char *src, int *out_count) {
                 break;
             case '+' :
                 if (lx.cur[1] == '=') { push_tok(&lx, T_PLUSEQ, s, 2); lx.cur += 2; }
+                else if (lx.cur[1] == '+') { push_tok(&lx, T_PLUSPLUS, s, 2); lx.cur += 2; }
                 else { push_tok(&lx, T_PLUS, s, 1); lx.cur++; }
                 break;
             case '-' :

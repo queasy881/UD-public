@@ -282,6 +282,145 @@ struct ud_struct *ud_struct_new(struct ud_structdef *def) {
 }
 
 /* ================================================================== */
+/* Module (named namespace)                                           */
+/* ================================================================== */
+
+struct ud_module *ud_module_new(struct ud_string *name) {
+    struct ud_module *m = (struct ud_module *)ud_alloc(sizeof(struct ud_module));
+    m->obj.otype = OBJ_MODULE;
+    m->name = name;
+    ud_map_init(&m->members);
+    return m;
+}
+
+void ud_module_set(struct ud_module *m, const char *name, struct ud_value v) {
+    ud_map_set(&m->members, ud_str_from_cstr(name), v);
+}
+
+/* ================================================================== */
+/* Dict: value-keyed hash map                                         */
+/* ================================================================== */
+
+uint32_t ud_value_hash(struct ud_value v) {
+    switch (v.type) {
+        case UD_NIL:  return 0u;
+        case UD_BOOL: return v.as.b ? 1231u : 1237u;
+        case UD_INT: {
+            uint64_t x = (uint64_t)v.as.i;
+            return (uint32_t)((x ^ (x >> 32)) * 2654435761u);
+        }
+        case UD_FLOAT: {
+            double d = v.as.d;
+            /* an integral float must hash like the equal int (1.0 == 1) */
+            if (d == (double)(long long)d) {
+                uint64_t x = (uint64_t)(long long)d;
+                return (uint32_t)((x ^ (x >> 32)) * 2654435761u);
+            }
+            uint64_t bits; memcpy(&bits, &d, 8);
+            return (uint32_t)((bits ^ (bits >> 32)) * 2654435761u);
+        }
+        case UD_OBJ:
+            if (v.as.o->otype == OBJ_STRING) return ((struct ud_string *)v.as.o)->hash;
+            return (uint32_t)((uintptr_t)v.as.o * 2654435761u);
+        default: return 0u;
+    }
+}
+
+struct ud_dict *ud_dict_new(void) {
+    struct ud_dict *d = (struct ud_dict *)ud_alloc(sizeof(struct ud_dict));
+    d->obj.otype = OBJ_DICT;
+    d->count = 0;
+    d->cap = 0;
+    d->entries = NULL;
+    d->order = NULL;
+    d->order_count = d->order_cap = 0;
+    return d;
+}
+
+static struct ud_dict_entry *dict_find(struct ud_dict_entry *entries, int cap,
+                                       struct ud_value key, uint32_t hash) {
+    uint32_t idx = hash & (uint32_t)(cap - 1);
+    struct ud_dict_entry *tomb = NULL;
+    for (;;) {
+        struct ud_dict_entry *e = &entries[idx];
+        if (e->state == 0) return tomb ? tomb : e;       /* empty: insert here */
+        if (e->state == 2) { if (!tomb) tomb = e; }      /* remember a tombstone */
+        else if (ud_value_equal(e->key, key)) return e;  /* found the live key */
+        idx = (idx + 1) & (uint32_t)(cap - 1);
+    }
+}
+
+static void dict_grow(struct ud_dict *d) {
+    int newcap = d->cap < 16 ? 16 : d->cap * 2;
+    struct ud_dict_entry *entries =
+        (struct ud_dict_entry *)calloc((size_t)newcap, sizeof(*entries));
+    if (!entries) { fprintf(stderr, "UD Error 99: out of memory\n"); exit(70); }
+    for (int i = 0; i < d->cap; i++) {
+        struct ud_dict_entry *e = &d->entries[i];
+        if (e->state != 1) continue;
+        struct ud_dict_entry *dst = dict_find(entries, newcap, e->key, ud_value_hash(e->key));
+        dst->key = e->key; dst->val = e->val; dst->state = 1;
+    }
+    free(d->entries);
+    d->entries = entries;
+    d->cap = newcap;
+}
+
+int ud_dict_get(struct ud_dict *d, struct ud_value key, struct ud_value *out) {
+    if (d->cap == 0) return 0;
+    struct ud_dict_entry *e = dict_find(d->entries, d->cap, key, ud_value_hash(key));
+    if (e->state != 1) return 0;
+    if (out) *out = e->val;
+    return 1;
+}
+
+static void dict_order_push(struct ud_dict *d, struct ud_value key) {
+    if (d->order_count + 1 > d->order_cap) {
+        int nc = d->order_cap < 8 ? 8 : d->order_cap * 2;
+        struct ud_value *o = (struct ud_value *)ud_alloc(sizeof(struct ud_value) * (size_t)nc);
+        if (d->order_count) memcpy(o, d->order, sizeof(struct ud_value) * (size_t)d->order_count);
+        d->order = o; d->order_cap = nc;
+    }
+    d->order[d->order_count++] = key;
+}
+
+void ud_dict_set(struct ud_dict *d, struct ud_value key, struct ud_value val) {
+    if (d->cap == 0 || d->count + 1 > d->cap * 3 / 4) dict_grow(d);
+    struct ud_dict_entry *e = dict_find(d->entries, d->cap, key, ud_value_hash(key));
+    if (e->state != 1) { d->count++; dict_order_push(d, key); }
+    e->key = key; e->val = val; e->state = 1;
+}
+
+int ud_dict_remove(struct ud_dict *d, struct ud_value key) {
+    if (d->cap == 0) return 0;
+    struct ud_dict_entry *e = dict_find(d->entries, d->cap, key, ud_value_hash(key));
+    if (e->state != 1) return 0;
+    e->state = 2; /* tombstone; order array keeps the (now absent) key, filtered on read */
+    d->count--;
+    return 1;
+}
+
+/* ================================================================== */
+/* Set (backed by a dict)                                             */
+/* ================================================================== */
+
+struct ud_set *ud_set_new(void) {
+    struct ud_set *s = (struct ud_set *)ud_alloc(sizeof(struct ud_set));
+    s->obj.otype = OBJ_SET;
+    s->backing = ud_dict_new();
+    return s;
+}
+int ud_set_has(struct ud_set *s, struct ud_value v) {
+    return ud_dict_get(s->backing, v, NULL);
+}
+void ud_set_add(struct ud_set *s, struct ud_value v) {
+    ud_dict_set(s->backing, v, ud_bool(1));
+}
+int ud_set_remove(struct ud_set *s, struct ud_value v) {
+    return ud_dict_remove(s->backing, v);
+}
+
+/* ================================================================== */
 /* Heap lifecycle                                                     */
 /* ================================================================== */
 
@@ -426,6 +565,50 @@ struct ud_string *ud_value_to_string(struct ud_value v) {
                 out = ud_str_concat(out, ud_value_to_string(s->fields[i]));
             }
             return ud_str_concat(out, ud_str_intern(")", 1));
+        }
+        case OBJ_MODULE: {
+            struct ud_module *m = UD_AS_MODULE(v);
+            struct ud_string *out = ud_str_intern("<module ", 8);
+            out = ud_str_concat(out, m->name);
+            return ud_str_concat(out, ud_str_intern(">", 1));
+        }
+        case OBJ_DICT: {
+            struct ud_dict *d = UD_AS_DICT(v);
+            struct ud_string *out = ud_str_intern("{", 1);
+            struct ud_string *q = ud_str_intern("\"", 1);
+            int shown = 0;
+            for (int i = 0; i < d->order_count; i++) {
+                struct ud_value k = d->order[i], val;
+                if (!ud_dict_get(d, k, &val)) continue; /* skip removed keys */
+                if (shown++) out = ud_str_concat(out, ud_str_intern(", ", 2));
+                if (UD_IS_STRING(k))
+                    out = ud_str_concat(ud_str_concat(out, ud_str_concat(q, UD_AS_STRING(k))), q);
+                else
+                    out = ud_str_concat(out, ud_value_to_string(k));
+                out = ud_str_concat(out, ud_str_intern(": ", 2));
+                if (UD_IS_STRING(val))
+                    out = ud_str_concat(ud_str_concat(out, ud_str_concat(q, UD_AS_STRING(val))), q);
+                else
+                    out = ud_str_concat(out, ud_value_to_string(val));
+            }
+            return ud_str_concat(out, ud_str_intern("}", 1));
+        }
+        case OBJ_SET: {
+            struct ud_set *s = UD_AS_SET(v);
+            struct ud_dict *d = s->backing;
+            struct ud_string *out = ud_str_intern("{", 1);
+            struct ud_string *q = ud_str_intern("\"", 1);
+            int shown = 0;
+            for (int i = 0; i < d->order_count; i++) {
+                struct ud_value k = d->order[i];
+                if (!ud_dict_get(d, k, NULL)) continue;
+                if (shown++) out = ud_str_concat(out, ud_str_intern(", ", 2));
+                if (UD_IS_STRING(k))
+                    out = ud_str_concat(ud_str_concat(out, ud_str_concat(q, UD_AS_STRING(k))), q);
+                else
+                    out = ud_str_concat(out, ud_value_to_string(k));
+            }
+            return ud_str_concat(out, ud_str_intern("}", 1));
         }
     }
     return ud_str_intern("?", 1);

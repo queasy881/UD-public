@@ -1,0 +1,10 @@
+-- A module: a plain .ud file with no entry(), meant to be require()d.
+const PI = 3.14159265
+
+function circle_area(r)
+    return PI * r * r
+end
+
+function rect_area(w, h)
+    return w * h
+end

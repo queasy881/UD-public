@@ -25,6 +25,7 @@ enum ud_op {
 
     OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_POW, OP_NEG,
     OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE,
+    OP_IN,             /* membership: a in b -> bool                         */
     OP_NOT,
     OP_BAND, OP_BOR, OP_BXOR, OP_BNOT, OP_SHL, OP_SHR,
     OP_CONCAT,
@@ -39,6 +40,9 @@ enum ud_op {
     OP_RETURN,         /* return top of stack from current function          */
 
     OP_ARRAY,          /* u16 count : build array from top `count` values    */
+    OP_DICT,           /* u16 count : build dict from top count key/val pairs */
+    OP_SET,            /* u16 count : build set from top `count` values       */
+    OP_ITER_KEYS,      /* replace top iterable with an array of its elements  */
     OP_INDEX_GET,      /* pop index, container -> push element               */
     OP_INDEX_SET,      /* stack: container index value -> leaves value       */
     OP_SLICE,          /* u8 flags (bit0 has-start, bit1 has-stop)           */
@@ -54,6 +58,10 @@ enum ud_op {
     OP_CIN_BOOL,       /* typed cin: boolean                                 */
 
     OP_TO_INT, OP_TO_FLOAT, OP_TO_BOOL, OP_TO_STRING, /* explicit conversions */
+
+    OP_TRY,            /* u8 catch-slot(0xFF=none), u16 catch-offset: arm handler */
+    OP_POP_TRY,        /* disarm the innermost try handler                   */
+    OP_THROW,          /* pop a value and raise it as a catchable error       */
 
     OP_PRINT,          /* debug helper (unused by codegen)                   */
     OP_HALT

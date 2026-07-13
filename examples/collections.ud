@@ -1,0 +1,28 @@
+-- Dictionaries and sets: two built-in collection types.
+int function entry()
+    -- A dict maps keys to values. Literal syntax is { key: value, ... }.
+    ages = { "alice": 30, "bob": 25 }
+    ages["carol"] = 28              -- index assignment adds or updates
+    cout("alice is " .. ages["alice"])
+
+    cout("has bob?            " .. ages.has("bob"))
+    cout("get dave (default): " .. ages.get("dave", 0))
+    cout("keys:               " .. ages.keys().sort().join(", "))
+    cout("count:              " .. ages.length())
+
+    ages.remove("bob")
+    cout("after remove, bob?  " .. ages.has("bob"))
+
+    -- Iterate a dict through its keys.
+    for name in ages.keys().sort() do
+        cout("  " .. name .. " -> " .. ages[name])
+    end
+
+    -- A set stores unique values. Literal syntax is { value, ... }.
+    colors = { "red", "green", "red", "blue" }   -- the duplicate collapses
+    colors.add("green")                          -- already present: no-op
+    cout("colors count: " .. colors.length())
+    cout("has green?    " .. colors.has("green"))
+    cout("values:       " .. colors.values().sort().join(", "))
+    return 0
+end

@@ -1,0 +1,16 @@
+-- checks if a number is odd or even
+
+string function oddoreven(int number)
+    if number % 2 == 0 then
+        return "even"
+    else
+        return "odd"
+    end
+end
+
+int function entry()
+    int number = cin("Enter a number: ")
+    string result = oddoreven(number)
+    cout("Result: " .. result)
+    return 0
+end

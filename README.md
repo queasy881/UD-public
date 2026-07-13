@@ -13,10 +13,14 @@ end
 
 - **Fast.** Source compiles straight to bytecode and runs on a stack VM that uses
   computed-goto dispatch on GCC/Clang. No tree-walking.
+- **Batteries included.** Arrays, dictionaries, sets, structs, lambdas with
+  higher-order methods (`map`/`filter`/`reduce`/`sort`), `try`/`catch`/`throw`,
+  `require` for splitting code across files, and built-in `math`, `random`,
+  `regex`, file, and string libraries.
 - **One VM, every way to run.** Interpret a script, compile it to a portable
   `.ldx` bytecode file, run a `.ldx`, or build a **standalone `.ldx`** that runs
   on its own with no `ud` installed — all through the exact same VM.
-- **Tiny.** The whole `ud` binary is ~130 KB.
+- **Tiny.** The whole `ud` binary is ~180 KB.
 - **Friendly failures.** Every error is numbered with a one-line plain-language
   reason. UD never shows you a raw C crash or a segfault.
 
@@ -86,7 +90,7 @@ executable, which the OS ignores.)
 
 Pass `--thin` when you'd rather have the small, cross-platform payload on its own.
 A thin `.ldx` is a handful of bytes and runs on any platform, but only through
-`ud run`. A standalone `.ldx` is bigger (it carries the ~130 KB runtime) and is
+`ud run`. A standalone `.ldx` is bigger (it carries the ~180 KB runtime) and is
 tied to the platform it was built on.
 
 | | standalone (default) | `--thin` |
@@ -94,7 +98,7 @@ tied to the platform it was built on.
 | Runs on its own | yes | no — needs `ud run` |
 | `ud run` works | yes | yes |
 | Cross-platform | no (native to the build OS) | yes |
-| Size | payload + ~130 KB runtime | just the payload |
+| Size | payload + ~180 KB runtime | just the payload |
 
 ---
 
@@ -126,7 +130,7 @@ All runnable code lives inside functions.
 ### Types
 
 UD has four value types you can name: `int`, `float`, `bool`, `string`, plus
-dynamic `array`s, `struct`s, and `nil`.
+dynamic `array`s, `dict`s, `set`s, `struct`s, first-class `function`s, and `nil`.
 
 ### Functions
 
@@ -169,10 +173,18 @@ value already is.
 | Comparison | `==`  `!=`  `<`  `>`  `<=`  `>=` |
 | Logical | `and`  `or`  `not`  (aliases: `&&`  `\|\|`  `!`) |
 | Bitwise | `&`  `\|`  `^`  `~`  `<<`  `>>` |
+| Conditional | `cond ? then : else` (ternary) |
 | Assignment | `=`  `+=`  `-=`  `*=`  `/=`  `%=` |
 
 `+` is for numbers only; use `..` to join text. `int / int` gives an `int`
 (truncated) — use floats for real division. `**` is exponentiation.
+
+The ternary `?:` is an expression, so it slots anywhere a value is expected:
+
+```ud
+label = n % 2 == 0 ? "even" : "odd"
+cout("the max is " .. (a > b ? a : b))
+```
 
 ### Control flow
 
@@ -253,6 +265,42 @@ cout(len(s))
 String methods: `upper`, `lower`, `trim` / `strip`, `replace`, `split`,
 `find` / `index`, `contains`, `length` / `len`, `join`.
 
+### Dictionaries
+
+A dict maps keys to values. Write one as `{ key: value, ... }`; index it with
+`[]`; assigning to a new key inserts it.
+
+```ud
+ages = { "alice": 30, "bob": 25 }
+ages["carol"] = 28             -- insert or update
+cout(ages["alice"])            -- read
+cout(ages.get("dave", 0))      -- read with a default (no error if absent)
+cout(ages.has("bob"))          -- membership test
+ages.remove("bob")
+for name in ages.keys() do     -- keys()/values() return arrays
+    cout(name .. " -> " .. ages[name])
+end
+```
+
+Dict methods: `get` (optional default), `set`, `has` / `contains`, `remove` /
+`delete`, `keys`, `values`, `length` / `len`. An empty `{}` is a dict.
+
+### Sets
+
+A set stores unique values. Write one as `{ value, ... }` — duplicates collapse.
+
+```ud
+colors = { "red", "green", "red" }   -- two elements
+colors.add("blue")
+cout(colors.has("green"))
+cout(colors.length())
+cout(colors.values().sort().join(", "))
+```
+
+Set methods: `add`, `has` / `contains`, `remove` / `delete`, `values` / `items`,
+`length` / `len`. (`{}` is an empty dict; a set literal always has at least one
+element, so build an empty set by adding to one.)
+
 ### Structs
 
 ```ud
@@ -270,6 +318,38 @@ end
 ```
 
 Fields are typed and coerced on assignment.
+
+### Lambdas and higher-order methods
+
+A **lambda** is an anonymous `function(...) ... end` used as a value. Lambdas are
+first-class: store them in a variable, pass them as arguments, return them, call
+them. (They do not capture surrounding locals — pass what they need as arguments.)
+
+```ud
+double = function(x) return x * 2 end
+cout(double(21))                       -- 42
+
+apply = function(f, x) return f(x) end
+cout(apply(double, 5))                 -- 10
+```
+
+Arrays carry higher-order methods that take a lambda and re-enter the VM for each
+element:
+
+```ud
+nums = [1, 2, 3, 4, 5]
+nums.map(function(x) return x * x end)          -- [1, 4, 9, 16, 25]
+nums.filter(function(x) return x % 2 == 1 end)  -- [1, 3, 5]
+nums.reduce(function(a, b) return a + b end, 0) -- 15  (optional seed)
+nums.sort(function(a, b) return a > b end)      -- [5, 4, 3, 2, 1]
+nums.foreach(function(x) cout(x) end)           -- also: each
+```
+
+`map`, `filter`, and `sort` return **new** arrays (the original is untouched);
+`sort` with no argument orders numbers or strings naturally, or takes a comparator
+that returns whether the first item should come first (a bool) or an ordering
+number (`<0`, `0`, `>0`). `reduce`'s seed is optional — without it, the first
+element starts the accumulation.
 
 ### Input and output
 
@@ -291,8 +371,137 @@ string name = cin("Name? ")    -- read a line; the prompt is optional
 
 A bare `cin(...)` with no declared type yields a string.
 
-There are also three conversion functions: `int(x)`, `float(x)`, `bool(x)`,
+There are also four conversion functions: `int(x)`, `float(x)`, `bool(x)`,
 `string(x)`, plus `len(x)` and `type(x)`.
+
+### `format` and `sleep`
+
+`format(template, ...)` fills `{}` placeholders in order (write `{{` / `}}` for
+literal braces); `sleep(seconds)` pauses (fractions are fine):
+
+```ud
+cout(format("{} of {} ({}%)", 3, 4, 75))   -- "3 of 4 (75%)"
+sleep(0.5)                                  -- half a second
+```
+
+### Files
+
+Four builtins cover text files, all relative to the working directory:
+
+```ud
+write_file("out.txt", "first\n")     -- create/overwrite
+append_file("out.txt", "second\n")   -- add to the end
+if file_exists("out.txt") then
+    cout(read_file("out.txt"))       -- whole file as a string
+end
+```
+
+---
+
+## Standard library
+
+Three modules are always available — no import needed.
+
+### `math`
+
+Constants `math.pi`, `math.e`, `math.tau`, `math.inf`, and functions `sqrt`,
+`cbrt`, `abs`, `sign`, `floor`, `ceil`, `round`, `trunc`, `exp`, `log`, `log10`,
+`log2`, `pow`, `hypot`, `gcd`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
+`atan2`, plus variadic `min` / `max`.
+
+```ud
+cout(math.sqrt(2))          -- 1.4142135623731
+cout(math.max(3, 9, 2))     -- 9
+cout(math.gcd(48, 36))      -- 12
+```
+
+### `random`
+
+| Call | Result |
+|---|---|
+| `random.integer(lo, hi)` | whole number in `[lo, hi]` (inclusive) |
+| `random.range(lo, hi)` | whole number in `[lo, hi)` (excludes `hi`) |
+| `random.float()` | float in `[0, 1)` |
+| `random.bool()` | `true` or `false` |
+| `random.choice(array)` | a random element |
+| `random.shuffle(array)` | shuffles the array in place, returns it |
+| `random.seed(n)` | seed the generator for reproducible runs |
+
+```ud
+random.seed(42)
+cout(random.integer(1, 6))              -- a dice roll
+cout(random.choice(["a", "b", "c"]))
+```
+
+### `regex`
+
+| Call | Result |
+|---|---|
+| `regex.test(pattern, s)` | `true` if the pattern matches anywhere |
+| `regex.match(pattern, s)` | the first matching substring, or `nil` |
+| `regex.find_all(pattern, s)` | an array of every match |
+| `regex.replace(pattern, s, with)` | `s` with every match replaced |
+
+```ud
+cout(regex.test("^[0-9]+$", "2024"))            -- true
+cout(regex.find_all("[a-z]+", "ab_cd").join(",")) -- "ab,cd"
+cout(regex.replace("[0-9]", "id=42", "*"))      -- "id=**"
+```
+
+---
+
+## Error handling
+
+Wrap risky code in `try` / `catch`. A runtime error (like division by zero) is
+delivered to the nearest `catch` as a message; `throw` raises your own error with
+any value, and `catch (name)` binds it — the parentheses are required to name it.
+
+```ud
+try
+    x = 10 / 0
+catch (e)
+    cout("caught: " .. e)      -- "caught: you divided by zero"
+end
+
+try
+    throw 404                  -- throw any value; its type is preserved
+catch (code)
+    cout(code * 2)             -- 808 — still an int
+end
+```
+
+A thrown value keeps its type, so an `int` you `throw` is still a number in the
+handler. `try`/`catch` blocks nest, and a `catch` may re-`throw` to an outer one.
+An uncaught `throw` that reaches the top prints as **UD Error 22** and stops the
+program.
+
+---
+
+## Modules
+
+`require("file.ud")` splices another file's top-level definitions into the current
+program **at compile time**. Paths resolve relative to the requiring file, repeats
+are deduped, and cycles are broken automatically, so a built `.ldx` stays
+self-contained — the modules travel inside it.
+
+```ud
+-- geometry.ud  (a module: no entry(), just definitions)
+const PI = 3.14159
+function circle_area(r) return PI * r * r end
+```
+
+```ud
+-- main.ud
+require("geometry.ud")
+
+int function entry()
+    cout(circle_area(2))       -- 12.56636
+    return 0
+end
+```
+
+`require` may appear only at the top level of a file, and a required module should
+not define `entry()` (that belongs to the program you run).
 
 ---
 
@@ -329,6 +538,7 @@ UD Error <N>: <short description>
 | 19 | Unknown method/attribute on a value |
 | 20 | Tried to call a non-function value |
 | 21 | Invalid explicit type conversion |
+| 22 | Uncaught error — a `throw` reached the top of the program |
 | 99 | Internal error (should never happen) |
 
 ---
@@ -348,6 +558,12 @@ Everything in [`examples/`](examples/) runs out of the box:
 | `loops.ud` | while, `while...unless`, for, break, continue |
 | `fib.ud` | recursion with typed functions |
 | `input.ud` | typed `cin` |
+| `evenorodd.ud` | typed function + `cin`, `%` |
+| `collections.ud` | dictionaries and sets |
+| `functional.ud` | lambdas, `map`/`filter`/`reduce`/`sort`, ternary |
+| `errors.ud` | `try` / `catch` / `throw` |
+| `stdlib.ud` | `math`, `random`, `regex`, `format`, files |
+| `modules.ud` | `require` (imports `geometry.ud`) |
 
 ```sh
 ud examples/loops.ud

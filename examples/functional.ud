@@ -1,0 +1,30 @@
+-- First-class functions: lambdas, higher-order array methods, and the ternary.
+int function entry()
+    nums = [1, 2, 3, 4, 5, 6]
+
+    -- A lambda is an anonymous `function(...) ... end` used as a value.
+    squared = nums.map(function(x) return x * x end)
+    cout("squared:    " .. squared.join(", "))
+
+    evens = nums.filter(function(x) return x % 2 == 0 end)
+    cout("evens:      " .. evens.join(", "))
+
+    total = nums.reduce(function(a, b) return a + b end, 0)
+    cout("sum:        " .. total)
+
+    -- sort() takes an optional comparator lambda.
+    desc = nums.sort(function(a, b) return a > b end)
+    cout("descending: " .. desc.join(", "))
+
+    nums.foreach(function(x) cout("  saw " .. x) end)
+
+    -- Lambdas are values: store them, pass them, call them.
+    apply_twice = function(f, x) return f(f(x)) end
+    cout("apply_twice(+3, 10) = " .. apply_twice(function(x) return x + 3 end, 10))
+
+    -- Ternary: cond ? then : else
+    for i = 1, 5 do
+        cout(i .. " is " .. (i % 2 == 0 ? "even" : "odd"))
+    end
+    return 0
+end

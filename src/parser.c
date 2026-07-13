@@ -2,6 +2,7 @@
 #include "parser.h"
 #include "errors.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -9,6 +10,7 @@ struct parser {
     struct ud_token *toks;
     int count;
     int pos;
+    const char *base_dir; /* directory of the current file, for resolving require() */
 };
 
 /* -------- token helpers -------- */
@@ -33,6 +35,19 @@ static struct ud_token *expect(struct parser *p, int type, const char *what) {
     if (!check(p, type))
         ud_error(UDE_SYNTAX, cur(p)->line, "expected %s here", what);
     return advance(p);
+}
+
+/* After a `.`, any word-spelled token is a valid member name -- keywords like
+ * `bool` or `end` become plain names in this position (e.g. random.bool). */
+static struct ud_token *expect_member(struct parser *p) {
+    struct ud_token *t = cur(p);
+    if (t->length > 0) {
+        char c = t->start[0];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_')
+            return advance(p);
+    }
+    ud_error(UDE_SYNTAX, t->line, "expected a field or method name here");
+    return t; /* unreachable */
 }
 
 /* -------- node helpers -------- */
@@ -89,6 +104,8 @@ static const char *decltype_name(int dt) {
 static struct ud_node *parse_expression(struct parser *p);
 static struct ud_node *parse_statement(struct parser *p);
 static struct ud_node *parse_block(struct parser *p);
+static struct ud_node *parse_const(struct parser *p);
+static struct ud_node *parse_lambda(struct parser *p);
 
 /* -------- string escapes -------- */
 
@@ -191,6 +208,45 @@ static struct ud_node *parse_primary(struct parser *p) {
             expect(p, T_RBRACK, "']' to close the array");
             return n;
         }
+        case T_LBRACE: { /* dict {k: v, ...} or set {v, ...}; empty {} is a dict */
+            advance(p);
+            if (check(p, T_RBRACE)) {           /* {} -> empty dict */
+                struct ud_node *n = new_node(p, N_DICT);
+                nl_init(&n->as.dict.keys);
+                nl_init(&n->as.dict.vals);
+                advance(p);
+                return n;
+            }
+            struct ud_node *first = parse_expression(p);
+            if (check(p, T_COLON)) {            /* { k: v, ... } -> dict */
+                struct ud_node *n = new_node(p, N_DICT);
+                nl_init(&n->as.dict.keys);
+                nl_init(&n->as.dict.vals);
+                advance(p); /* consume ':' */
+                nl_push(&n->as.dict.keys, first);
+                nl_push(&n->as.dict.vals, parse_expression(p));
+                while (match(p, T_COMMA)) {
+                    if (check(p, T_RBRACE)) break; /* trailing comma */
+                    nl_push(&n->as.dict.keys, parse_expression(p));
+                    expect(p, T_COLON, "':' between a dict key and its value");
+                    nl_push(&n->as.dict.vals, parse_expression(p));
+                }
+                expect(p, T_RBRACE, "'}' to close the dict");
+                return n;
+            } else {                            /* { v, ... } -> set */
+                struct ud_node *n = new_node(p, N_SET);
+                nl_init(&n->as.set.elems);
+                nl_push(&n->as.set.elems, first);
+                while (match(p, T_COMMA)) {
+                    if (check(p, T_RBRACE)) break; /* trailing comma */
+                    nl_push(&n->as.set.elems, parse_expression(p));
+                }
+                expect(p, T_RBRACE, "'}' to close the set");
+                return n;
+            }
+        }
+        case T_FUNCTION: /* anonymous function expression (lambda) */
+            return parse_lambda(p);
         default:
             ud_error(UDE_SYNTAX, t->line,
                      "expected a value (number, string, name, or '(') here");
@@ -208,7 +264,7 @@ static struct ud_node *parse_postfix(struct parser *p) {
             node = n;
         } else if (check(p, T_DOT)) {
             advance(p);
-            struct ud_token *name = expect(p, T_IDENT, "a field or method name");
+            struct ud_token *name = expect_member(p);
             if (check(p, T_LPAREN)) {
                 struct ud_node *n = new_node(p, N_METHOD);
                 n->as.method.target = node;
@@ -221,6 +277,12 @@ static struct ud_node *parse_postfix(struct parser *p) {
                 n->as.field.name = tok_str(name);
                 node = n;
             }
+        } else if (check(p, T_PLUSPLUS)) { /* postfix x++ */
+            advance(p);
+            struct ud_node *n = new_node(p, N_INCR);
+            n->as.incr.target = node;
+            n->as.incr.is_prefix = 0;
+            node = n;
         } else if (check(p, T_LBRACK)) {
             advance(p);
             struct ud_node *start = NULL, *stop = NULL;
@@ -274,6 +336,13 @@ static struct ud_node *parse_power(struct parser *p) {
 }
 
 static struct ud_node *parse_unary(struct parser *p) {
+    if (check(p, T_PLUSPLUS)) { /* prefix ++x */
+        advance(p);
+        struct ud_node *n = new_node(p, N_INCR);
+        n->as.incr.target = parse_unary(p);
+        n->as.incr.is_prefix = 1;
+        return n;
+    }
     if (check(p, T_MINUS) || check(p, T_TILDE) || check(p, T_PLUS)) {
         int op = advance(p)->type;
         struct ud_node *operand = parse_unary(p);
@@ -309,7 +378,7 @@ BINCHAIN(parse_bitxor,   parse_bitand, check(p,T_CARET))
 BINCHAIN(parse_bitor,    parse_bitxor, check(p,T_PIPE))
 BINCHAIN(parse_comparison, parse_bitor,
          check(p,T_EQ)||check(p,T_NE)||check(p,T_LT)||
-         check(p,T_GT)||check(p,T_LE)||check(p,T_GE))
+         check(p,T_GT)||check(p,T_LE)||check(p,T_GE)||check(p,T_IN))
 
 static struct ud_node *parse_not(struct parser *p) {
     if (check(p, T_NOT)) {
@@ -351,8 +420,23 @@ static struct ud_node *parse_or(struct parser *p) {
     return left;
 }
 
+/* ternary: cond ? then : else  (lower than `or`, right-associative) */
+static struct ud_node *parse_ternary(struct parser *p) {
+    struct ud_node *cond = parse_or(p);
+    if (check(p, T_QUESTION)) {
+        advance(p);
+        struct ud_node *n = new_node(p, N_TERNARY);
+        n->as.ternary.cond = cond;
+        n->as.ternary.then = parse_ternary(p);
+        expect(p, T_COLON, "':' in a ternary '?:' expression");
+        n->as.ternary.els = parse_ternary(p);
+        return n;
+    }
+    return cond;
+}
+
 static struct ud_node *parse_expression(struct parser *p) {
-    return parse_or(p);
+    return parse_ternary(p);
 }
 
 /* -------- statements -------- */
@@ -365,7 +449,7 @@ static int is_assign_op(int type) {
 static int is_block_end(struct parser *p) {
     int t = cur(p)->type;
     return t == T_END || t == T_ELSE || t == T_ELSEIF ||
-           t == T_UNLESS || t == T_EOF;
+           t == T_UNLESS || t == T_CATCH || t == T_EOF;
 }
 
 static struct ud_node *parse_if(struct parser *p) {
@@ -431,6 +515,37 @@ static struct ud_node *parse_for(struct parser *p) {
     return NULL;
 }
 
+/* try <body> catch [(name)] <handler> end
+ * The catch variable is optional and, when present, written in parentheses:
+ *   catch (e)  -> e receives the thrown value (or a string for a runtime error)
+ *   catch      -> the error is not bound to a name
+ * Parentheses are required around the name so a handler that simply starts with
+ * a call (e.g. `cout(...)`) is never mistaken for the error variable. */
+static struct ud_node *parse_try(struct parser *p) {
+    struct ud_node *n = new_node(p, N_TRY);
+    advance(p); /* try */
+    n->as.trycatch.body = parse_block(p);
+    expect(p, T_CATCH, "'catch' to handle errors from the 'try' block");
+
+    n->as.trycatch.errname = NULL;
+    if (match(p, T_LPAREN)) {
+        if (check(p, T_IDENT))
+            n->as.trycatch.errname = tok_str(advance(p));
+        expect(p, T_RPAREN, "')' after the catch variable");
+    }
+
+    n->as.trycatch.handler = parse_block(p);
+    expect(p, T_END, "'end' to close the try/catch");
+    return n;
+}
+
+static struct ud_node *parse_throw(struct parser *p) {
+    struct ud_node *n = new_node(p, N_THROW);
+    advance(p); /* throw */
+    n->as.expr = parse_expression(p);
+    return n;
+}
+
 static struct ud_node *parse_vardecl(struct parser *p) {
     struct ud_node *n = new_node(p, N_VARDECL);
     n->as.vardecl.dtype = (uint8_t)decltype_of(advance(p)->type);
@@ -451,22 +566,66 @@ static struct ud_node *parse_statement(struct parser *p) {
         return parse_vardecl(p);
 
     switch (t) {
+        case T_CONST: return parse_const(p);
         case T_IF:    return parse_if(p);
         case T_WHILE: return parse_while(p);
         case T_FOR:   return parse_for(p);
         case T_RETURN: {
             struct ud_node *n = new_node(p, N_RETURN);
             advance(p);
-            n->as.expr = is_block_end(p) ? NULL : parse_expression(p);
+            if (is_block_end(p)) { n->as.expr = NULL; return n; }
+            struct ud_node *first = parse_expression(p);
+            if (check(p, T_COMMA)) {   /* return a, b, c -> packs an array */
+                struct ud_node *arr = new_node(p, N_ARRAY);
+                nl_init(&arr->as.array.elems);
+                nl_push(&arr->as.array.elems, first);
+                while (match(p, T_COMMA))
+                    nl_push(&arr->as.array.elems, parse_expression(p));
+                n->as.expr = arr;
+            } else {
+                n->as.expr = first;
+            }
             return n;
         }
         case T_BREAK:    { struct ud_node *n = new_node(p, N_BREAK);    advance(p); return n; }
         case T_CONTINUE: { struct ud_node *n = new_node(p, N_CONTINUE); advance(p); return n; }
+        case T_TRY:   return parse_try(p);
+        case T_THROW: return parse_throw(p);
+        case T_REQUIRE:
+            ud_error(UDE_SYNTAX, cur(p)->line,
+                     "require may only appear at the top level of a file, "
+                     "not inside a function");
+            return NULL; /* unreachable */
         default: break;
     }
 
     /* expression statement or assignment */
     struct ud_node *expr = parse_expression(p);
+
+    /* destructuring / multiple assignment: a, b, ... = ... */
+    if (check(p, T_COMMA)) {
+        struct ud_node *n = new_node(p, N_MULTIVARDECL);
+        nl_init(&n->as.multi.names);
+        nl_push(&n->as.multi.names, expr);
+        while (match(p, T_COMMA))
+            nl_push(&n->as.multi.names, parse_expression(p));
+        expect(p, T_ASSIGN, "'=' to give the names their values");
+        struct ud_node *first = parse_expression(p);
+        if (check(p, T_COMMA)) {   /* several values -> pack into an array */
+            struct ud_node *arr = new_node(p, N_ARRAY);
+            nl_init(&arr->as.array.elems);
+            nl_push(&arr->as.array.elems, first);
+            while (match(p, T_COMMA))
+                nl_push(&arr->as.array.elems, parse_expression(p));
+            n->as.multi.init = arr;
+        } else {
+            n->as.multi.init = first;
+        }
+        n->as.multi.is_typed = 0;
+        n->as.multi.dtype = DT_NONE;
+        return n;
+    }
+
     if (is_assign_op(cur(p)->type)) {
         if (expr->kind != N_IDENT && expr->kind != N_INDEX && expr->kind != N_FIELD)
             ud_error(UDE_SYNTAX, cur(p)->line,
@@ -492,13 +651,9 @@ static struct ud_node *parse_block(struct parser *p) {
 
 /* -------- declarations -------- */
 
-static struct ud_node *parse_function(struct parser *p, int has_ret, int rtype) {
-    expect(p, T_FUNCTION, "'function'");
-    struct ud_token *name = expect(p, T_IDENT, "a function name");
-    struct ud_node *n = new_node(p, N_FUNC);
-    n->as.func.name = tok_str(name);
-    n->as.func.has_ret = has_ret;
-    n->as.func.rtype = (uint8_t)rtype;
+/* Shared tail of every function form: "(params) body end", filling an
+ * already-created N_FUNC/N_LAMBDA node whose name/return fields are set. */
+static void parse_params_and_body(struct parser *p, struct ud_node *n) {
     nl_init(&n->as.func.params);
 
     expect(p, T_LPAREN, "'(' for the parameter list");
@@ -526,6 +681,30 @@ static struct ud_node *parse_function(struct parser *p, int has_ret, int rtype) 
     n->as.func.ptypes = ptypes;
     n->as.func.body = parse_block(p);
     expect(p, T_END, "'end' to close the function");
+}
+
+static struct ud_node *parse_function(struct parser *p, int has_ret, int rtype) {
+    expect(p, T_FUNCTION, "'function'");
+    struct ud_token *name = expect(p, T_IDENT, "a function name");
+    struct ud_node *n = new_node(p, N_FUNC);
+    n->as.func.name = tok_str(name);
+    n->as.func.has_ret = has_ret;
+    n->as.func.rtype = (uint8_t)rtype;
+    parse_params_and_body(p, n);
+    return n;
+}
+
+/* Anonymous function expression `function(params) ... end`: same machinery as a
+ * named function, but nameless and with a dynamic (untyped) return. Lambdas are
+ * first-class values -- store them in a variable, pass them, return them, call
+ * them. They do not capture enclosing locals (pass what they need as args). */
+static struct ud_node *parse_lambda(struct parser *p) {
+    expect(p, T_FUNCTION, "'function'");
+    struct ud_node *n = new_node(p, N_LAMBDA);
+    n->as.func.name = NULL;
+    n->as.func.has_ret = 0;
+    n->as.func.rtype = (uint8_t)DT_NONE;
+    parse_params_and_body(p, n);
     return n;
 }
 
@@ -559,8 +738,167 @@ static struct ud_node *parse_struct(struct parser *p) {
     return n;
 }
 
+static struct ud_node *parse_const(struct parser *p) {
+    struct ud_node *n = new_node(p, N_VARDECL);
+    advance(p); /* const */
+    struct ud_token *name = expect(p, T_IDENT, "a name for the constant");
+    n->as.vardecl.name = tok_str(name);
+    n->as.vardecl.dtype = DT_NONE;
+    n->as.vardecl.is_typed = 0;
+    n->as.vardecl.is_const = 1;
+    expect(p, T_ASSIGN, "'=' (a constant must be given a value)");
+    n->as.vardecl.init = parse_expression(p);
+    return n;
+}
+
+static struct ud_node *parse_enum(struct parser *p) {
+    advance(p); /* enum */
+    struct ud_token *name = expect(p, T_IDENT, "an enum name");
+    struct ud_node *n = new_node(p, N_ENUM);
+    n->as.enumdef.name = tok_str(name);
+    nl_init(&n->as.enumdef.names);
+    nl_init(&n->as.enumdef.vals);
+    while (!check(p, T_END) && !check(p, T_EOF)) {
+        struct ud_token *m = expect(p, T_IDENT, "an enum member name");
+        struct ud_node *id = new_node(p, N_IDENT);
+        id->as.sval = tok_str(m);
+        nl_push(&n->as.enumdef.names, id);
+        struct ud_node *val = NULL;
+        if (match(p, T_ASSIGN)) val = parse_expression(p);
+        nl_push(&n->as.enumdef.vals, val); /* NULL => auto-increment */
+        match(p, T_COMMA); /* comma between members is optional */
+    }
+    expect(p, T_END, "'end' to close the enum");
+    return n;
+}
+
+/* -------- require(): compile-time module include --------
+ *
+ * `require("lib.ud")` at the top level lexes and parses that file's top-level
+ * declarations and splices them straight into the current program, so a built
+ * .ldx stays self-contained. Paths resolve relative to the requiring file's
+ * directory; a registry of canonical paths dedupes repeats and breaks cycles. */
+
+#define UD_REQUIRE_MAX 512
+static char *g_required[UD_REQUIRE_MAX];
+static int   g_required_count;
+
+static char *xstrdup(const char *s) {
+    size_t n = strlen(s) + 1;
+    char *d = (char *)malloc(n);
+    if (!d) ud_error(UDE_INTERNAL, 0, "out of memory");
+    memcpy(d, s, n);
+    return d;
+}
+
+/* Directory prefix of `path`, including the trailing separator, or "" if none. */
+static char *dir_prefix(const char *path) {
+    if (!path) return xstrdup("");
+    size_t n = strlen(path);
+    long sep = -1;
+    for (size_t i = 0; i < n; i++)
+        if (path[i] == '/' || path[i] == '\\') sep = (long)i;
+    if (sep < 0) return xstrdup("");
+    char *d = (char *)malloc((size_t)sep + 2);
+    if (!d) ud_error(UDE_INTERNAL, 0, "out of memory");
+    memcpy(d, path, (size_t)sep + 1);
+    d[sep + 1] = '\0';
+    return d;
+}
+
+static int path_is_absolute(const char *p) {
+    if (!p || !p[0]) return 0;
+    if (p[0] == '/' || p[0] == '\\') return 1;
+    if (((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[1] == ':')
+        return 1;
+    return 0;
+}
+
+/* Join base_dir + rel (or just rel if absolute). Caller frees. */
+static char *resolve_path(const char *base_dir, const char *rel) {
+    if (path_is_absolute(rel) || !base_dir || !base_dir[0]) return xstrdup(rel);
+    size_t a = strlen(base_dir), b = strlen(rel);
+    char *out = (char *)malloc(a + b + 1);
+    if (!out) ud_error(UDE_INTERNAL, 0, "out of memory");
+    memcpy(out, base_dir, a);
+    memcpy(out + a, rel, b + 1);
+    return out;
+}
+
+/* A normalized absolute path used as the dedup key. Caller frees. */
+static char *canonical_path(const char *path) {
+#ifdef _WIN32
+    char *full = _fullpath(NULL, path, 0);
+#else
+    char *full = realpath(path, NULL);
+#endif
+    if (full) return full;      /* malloc'd by the C library */
+    return xstrdup(path);       /* fall back to the joined path as-is */
+}
+
+static int require_seen(const char *key) {
+    for (int i = 0; i < g_required_count; i++)
+        if (strcmp(g_required[i], key) == 0) return 1;
+    return 0;
+}
+
+static char *require_read_file(const char *path, int line) {
+    FILE *f = fopen(path, "rb");
+    if (!f) ud_error(UDE_IO, line, "could not open required file '%s'", path);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz < 0) { fclose(f); ud_error(UDE_IO, line, "could not read required file '%s'", path); }
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); ud_error(UDE_INTERNAL, line, "out of memory"); }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    buf[got] = '\0';
+    fclose(f);
+    return buf;
+}
+
+static struct ud_node *parse_toplevel(struct parser *p);
+static void parse_into_program(struct parser *p, struct ud_node *program);
+
+/* Handle a top-level `require("file")`: splice the module's declarations in. */
+static void parse_require(struct parser *p, struct ud_node *program) {
+    int line = cur(p)->line;
+    advance(p); /* 'require' */
+    int paren = match(p, T_LPAREN);
+    if (!check(p, T_STRING))
+        ud_error(UDE_SYNTAX, cur(p)->line,
+                 "require expects a quoted file name, e.g. require(\"lib.ud\")");
+    struct ud_string *rel = make_string_literal(cur(p));
+    advance(p);
+    if (paren) expect(p, T_RPAREN, "')' after the required file name");
+
+    char *full = resolve_path(p->base_dir, rel->chars);
+    char *key  = canonical_path(full);
+    free(full);
+    if (require_seen(key)) { free(key); return; }   /* already included / cycle */
+    if (g_required_count >= UD_REQUIRE_MAX)
+        ud_error(UDE_INTERNAL, line, "too many required files (limit %d)", UD_REQUIRE_MAX);
+    g_required[g_required_count++] = key;            /* registry owns key */
+
+    char *src = require_read_file(key, line);
+    int ntok = 0;
+    struct ud_token *toks = ud_lex(src, &ntok);
+    char *subdir = dir_prefix(key);
+
+    struct parser sub;
+    sub.toks = toks; sub.count = ntok; sub.pos = 0; sub.base_dir = subdir;
+    parse_into_program(&sub, program);
+
+    free(subdir);
+    free(toks);
+    free(src);
+    /* `key` stays alive in the registry; freed when the top-level parse ends. */
+}
+
 static struct ud_node *parse_toplevel(struct parser *p) {
     int t = cur(p)->type;
+    if (t == T_CONST) return parse_const(p);
+    if (t == T_ENUM)  return parse_enum(p);
     if (is_type_kw(t)) {
         /* `int function name(...)`  -- typed return */
         int rtype = decltype_of(advance(p)->type);
@@ -579,18 +917,37 @@ static struct ud_node *parse_toplevel(struct parser *p) {
     return NULL;
 }
 
-struct ud_node *ud_parse(struct ud_token *toks, int count) {
+/* Drain a parser's top-level items into `program`, expanding require() inline. */
+static void parse_into_program(struct parser *p, struct ud_node *program) {
+    while (!check(p, T_EOF)) {
+        if (check(p, T_REQUIRE)) { parse_require(p, program); continue; }
+        nl_push(&program->as.block, parse_toplevel(p));
+    }
+}
+
+struct ud_node *ud_parse(struct ud_token *toks, int count, const char *path) {
+    g_required_count = 0; /* fresh registry for this top-level parse */
+
     struct parser p;
     p.toks = toks;
     p.count = count;
     p.pos = 0;
+    char *base = dir_prefix(path);
+    p.base_dir = base;
+
+    /* Record the main file so a module that requires it back is skipped. */
+    if (path && g_required_count < UD_REQUIRE_MAX)
+        g_required[g_required_count++] = canonical_path(path);
 
     struct ud_node *program = (struct ud_node *)ud_alloc(sizeof(struct ud_node));
     memset(program, 0, sizeof(*program));
     program->kind = N_BLOCK;
     program->line = 1;
     nl_init(&program->as.block);
-    while (!check(&p, T_EOF))
-        nl_push(&program->as.block, parse_toplevel(&p));
+    parse_into_program(&p, program);
+
+    free(base);
+    for (int i = 0; i < g_required_count; i++) free(g_required[i]);
+    g_required_count = 0;
     return program;
 }

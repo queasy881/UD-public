@@ -78,6 +78,43 @@ static void w_str(FILE *f, struct ud_string *s) {
     if (s->length) fwrite(s->chars, 1, (size_t)s->length, f);
 }
 
+/* Serialize one function chunk: header, code, line table, then constants.
+ * Recursive -- a constant may itself be a function (a lambda), tagged 5. */
+static void write_function(FILE *f, struct ud_function *fn) {
+    w_str(f, fn->name);
+    w_u32(f, (uint32_t)fn->arity);
+    for (int j = 0; j < fn->arity; j++)
+        w_u8(f, fn->param_types ? fn->param_types[j] : (uint8_t)DT_NONE);
+    w_u8(f, fn->return_type);
+    w_u32(f, (uint32_t)fn->num_slots);
+    w_u32(f, (uint32_t)fn->code_len);
+    if (fn->code_len) fwrite(fn->code, 1, (size_t)fn->code_len, f);
+    for (int j = 0; j < fn->code_len; j++) w_u32(f, (uint32_t)fn->lines[j]);
+    w_u32(f, (uint32_t)fn->const_count);
+    for (int j = 0; j < fn->const_count; j++) {
+        struct ud_value v = fn->consts[j];
+        switch (v.type) {
+            case UD_NIL:   w_u8(f, 0); break;
+            case UD_BOOL:  w_u8(f, 1); w_u8(f, (uint8_t)v.as.b); break;
+            case UD_INT:   w_u8(f, 2); w_u64(f, (uint64_t)v.as.i); break;
+            case UD_FLOAT: {
+                uint64_t bits; memcpy(&bits, &v.as.d, 8);
+                w_u8(f, 3); w_u64(f, bits);
+                break;
+            }
+            case UD_OBJ:
+                if (UD_IS_STRING(v)) { w_u8(f, 4); w_str(f, UD_AS_STRING(v)); }
+                else if (UD_IS_FUNCTION(v)) {
+                    w_u8(f, 5); write_function(f, UD_AS_FUNCTION(v));
+                } else ud_error(UDE_INTERNAL, 0,
+                                "internal: cannot serialize this constant");
+                break;
+            default:
+                ud_error(UDE_INTERNAL, 0, "internal: bad constant type");
+        }
+    }
+}
+
 /* Write just the portable UDLX payload to an already-open stream. Shared by the
  * thin and standalone writers -- the only difference between the two formats is
  * what surrounds this payload. */
@@ -102,40 +139,8 @@ static void write_payload(FILE *f, struct ud_program *prog) {
         }
     }
 
-    for (int i = 0; i < prog->function_count; i++) {
-        struct ud_function *fn = prog->functions[i];
-        w_str(f, fn->name);
-        w_u32(f, (uint32_t)fn->arity);
-        for (int j = 0; j < fn->arity; j++)
-            w_u8(f, fn->param_types ? fn->param_types[j] : (uint8_t)DT_NONE);
-        w_u8(f, fn->return_type);
-        w_u32(f, (uint32_t)fn->num_slots);
-        w_u32(f, (uint32_t)fn->code_len);
-        if (fn->code_len) fwrite(fn->code, 1, (size_t)fn->code_len, f);
-        for (int j = 0; j < fn->code_len; j++) w_u32(f, (uint32_t)fn->lines[j]);
-        w_u32(f, (uint32_t)fn->const_count);
-        for (int j = 0; j < fn->const_count; j++) {
-            struct ud_value v = fn->consts[j];
-            switch (v.type) {
-                case UD_NIL:   w_u8(f, 0); break;
-                case UD_BOOL:  w_u8(f, 1); w_u8(f, (uint8_t)v.as.b); break;
-                case UD_INT:   w_u8(f, 2); w_u64(f, (uint64_t)v.as.i); break;
-                case UD_FLOAT: {
-                    uint64_t bits; memcpy(&bits, &v.as.d, 8);
-                    w_u8(f, 3); w_u64(f, bits);
-                    break;
-                }
-                case UD_OBJ:
-                    if (UD_IS_STRING(v)) { w_u8(f, 4); w_str(f, UD_AS_STRING(v)); }
-                    else ud_error(UDE_INTERNAL, 0,
-                                  "internal: cannot serialize this constant");
-                    break;
-                default:
-                    ud_error(UDE_INTERNAL, 0, "internal: bad constant type");
-            }
-        }
-    }
-
+    for (int i = 0; i < prog->function_count; i++)
+        write_function(f, prog->functions[i]);
 }
 
 /* Thin .ldx: nothing but the portable payload. */
@@ -230,6 +235,56 @@ static struct ud_string *r_str(struct reader *r) {
     return s;
 }
 
+/* Read one function chunk written by write_function(). Recursive: a constant
+ * tagged 5 is a nested function (a lambda). */
+static struct ud_function *read_function(struct reader *r) {
+    struct ud_string *name = r_str(r);
+    struct ud_function *fn = ud_function_new(name);
+    fn->arity = (int)r_u32(r);
+    if (fn->arity > 0) {
+        fn->param_types = (uint8_t *)ud_alloc((size_t)fn->arity);
+        for (int j = 0; j < fn->arity; j++) fn->param_types[j] = r_u8(r);
+    }
+    fn->return_type = r_u8(r);
+    fn->num_slots = (int)r_u32(r);
+    fn->code_len = (int)r_u32(r);
+    fn->code_cap = fn->code_len;
+    if (fn->code_len > 0) {
+        if (r->p + fn->code_len > r->end) r_fail(r, "this .ldx file is truncated");
+        fn->code = (uint8_t *)ud_alloc((size_t)fn->code_len);
+        memcpy(fn->code, r->p, (size_t)fn->code_len);
+        r->p += fn->code_len;
+        fn->lines = (int *)ud_alloc(sizeof(int) * (size_t)fn->code_len);
+        for (int j = 0; j < fn->code_len; j++) fn->lines[j] = (int)r_u32(r);
+    }
+    fn->const_count = (int)r_u32(r);
+    fn->const_cap = fn->const_count;
+    if (fn->const_count > 0)
+        fn->consts = (struct ud_value *)
+            ud_alloc(sizeof(struct ud_value) * (size_t)fn->const_count);
+    for (int j = 0; j < fn->const_count; j++) {
+        uint8_t tag = r_u8(r);
+        struct ud_value v;
+        switch (tag) {
+            case 0: v = ud_nil(); break;
+            case 1: v = ud_bool(r_u8(r)); break;
+            case 2: v = ud_int((long long)r_u64(r)); break;
+            case 3: {
+                uint64_t bits = r_u64(r);
+                double d; memcpy(&d, &bits, 8);
+                v = ud_float(d);
+                break;
+            }
+            case 4: v = ud_obj_val((struct ud_obj *)r_str(r)); break;
+            case 5: v = ud_obj_val((struct ud_obj *)read_function(r)); break;
+            default: r_fail(r, "this .ldx file has a corrupt constant");
+                     return NULL; /* unreachable: r_fail never returns */
+        }
+        fn->consts[j] = v;
+    }
+    return fn;
+}
+
 void ud_serialize_read(struct ud_program *prog, const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) ud_error(UDE_IO, 0, "could not open '%s'", path);
@@ -278,50 +333,8 @@ void ud_serialize_read(struct ud_program *prog, const char *path) {
     }
 
     for (uint32_t i = 0; i < fcount; i++) {
-        struct ud_string *name = r_str(&r);
-        struct ud_function *fn = ud_function_new(name);
-        fn->arity = (int)r_u32(&r);
-        if (fn->arity > 0) {
-            fn->param_types = (uint8_t *)ud_alloc((size_t)fn->arity);
-            for (int j = 0; j < fn->arity; j++) fn->param_types[j] = r_u8(&r);
-        }
-        fn->return_type = r_u8(&r);
-        fn->num_slots = (int)r_u32(&r);
-        fn->code_len = (int)r_u32(&r);
-        fn->code_cap = fn->code_len;
-        if (fn->code_len > 0) {
-            if (r.p + fn->code_len > r.end) r_fail(&r, "this .ldx file is truncated");
-            fn->code = (uint8_t *)ud_alloc((size_t)fn->code_len);
-            memcpy(fn->code, r.p, (size_t)fn->code_len);
-            r.p += fn->code_len;
-            fn->lines = (int *)ud_alloc(sizeof(int) * (size_t)fn->code_len);
-            for (int j = 0; j < fn->code_len; j++) fn->lines[j] = (int)r_u32(&r);
-        }
-        fn->const_count = (int)r_u32(&r);
-        fn->const_cap = fn->const_count;
-        if (fn->const_count > 0)
-            fn->consts = (struct ud_value *)
-                ud_alloc(sizeof(struct ud_value) * (size_t)fn->const_count);
-        for (int j = 0; j < fn->const_count; j++) {
-            uint8_t tag = r_u8(&r);
-            struct ud_value v;
-            switch (tag) {
-                case 0: v = ud_nil(); break;
-                case 1: v = ud_bool(r_u8(&r)); break;
-                case 2: v = ud_int((long long)r_u64(&r)); break;
-                case 3: {
-                    uint64_t bits = r_u64(&r);
-                    double d; memcpy(&d, &bits, 8);
-                    v = ud_float(d);
-                    break;
-                }
-                case 4: v = ud_obj_val((struct ud_obj *)r_str(&r)); break;
-                default: r_fail(&r, "this .ldx file has a corrupt constant");
-                         return; /* unreachable: r_fail never returns */
-            }
-            fn->consts[j] = v;
-        }
-        ud_map_set(&prog->globals, name, ud_obj_val((struct ud_obj *)fn));
+        struct ud_function *fn = read_function(&r);
+        ud_map_set(&prog->globals, fn->name, ud_obj_val((struct ud_obj *)fn));
         ud_program_add_function(prog, fn);
     }
 

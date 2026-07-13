@@ -23,11 +23,14 @@ enum ud_tok {
     T_AND, T_OR, T_NOT,
     T_NIL, T_TRUE, T_FALSE,
     T_KW_INT, T_KW_FLOAT, T_KW_BOOL, T_KW_STRING, /* type keywords */
+    T_CONST, T_ENUM,
+    T_TRY, T_CATCH, T_THROW, T_REQUIRE,
 
     /* punctuation / operators */
-    T_LPAREN, T_RPAREN, T_LBRACK, T_RBRACK,
-    T_COMMA, T_DOT, T_COLON,
+    T_LPAREN, T_RPAREN, T_LBRACK, T_RBRACK, T_LBRACE, T_RBRACE,
+    T_COMMA, T_DOT, T_COLON, T_QUESTION,
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PERCENT, T_STARSTAR,
+    T_PLUSPLUS,                  /* ++ */
     T_CONCAT,                    /* .. */
     T_ASSIGN,                    /* =  */
     T_PLUSEQ, T_MINUSEQ, T_STAREQ, T_SLASHEQ, T_PERCENTEQ,

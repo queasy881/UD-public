@@ -1,0 +1,32 @@
+-- A tour of the standard library: math, random, regex, format, files, sleep.
+int function entry()
+    -- math
+    cout("sqrt(144)  = " .. math.sqrt(144))
+    cout("floor(3.9) = " .. math.floor(3.9))
+    cout("gcd(48,36) = " .. math.gcd(48, 36))
+    cout("max(4,9,1) = " .. math.max(4, 9, 1))
+    cout("pi         = " .. math.pi)
+
+    -- random (seeded, so this run is reproducible)
+    random.seed(1)
+    cout("dice       = " .. random.integer(1, 6))
+    cout("pick       = " .. random.choice(["north", "south", "east", "west"]))
+
+    -- regex
+    cout("is number? = " .. regex.test("^[0-9]+$", "2024"))
+    cout("words      = " .. regex.find_all("[a-z]+", "ab_cd_ef").join(","))
+    cout("masked     = " .. regex.replace("[0-9]", "id=42", "*"))
+
+    -- format: {} placeholders, {{ }} to write literal braces
+    cout(format("{} of {} ({}%)", 3, 4, 75))
+
+    -- file I/O + sleep
+    write_file("note.txt", "first\n")
+    append_file("note.txt", "second\n")
+    if file_exists("note.txt") then
+        cout("file says: " .. read_file("note.txt").trim())
+    end
+    sleep(0.05)   -- seconds
+    cout("slept 50ms")
+    return 0
+end

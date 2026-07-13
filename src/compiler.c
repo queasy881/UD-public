@@ -10,6 +10,7 @@
 #include "lexer.h"
 
 #include <string.h>
+#include <math.h>
 
 /* ------------------------------------------------------------------ */
 /* Compiler state                                                     */
@@ -18,11 +19,25 @@
 struct local {
     struct ud_string *name;
     int depth;
+    uint8_t is_const;
+};
+
+/* Compile-time constant environment shared across a whole file: named
+ * top-level constants and enum members are folded to literal values, so a
+ * reference to one emits OP_CONST and no runtime global is needed. Keys are
+ * interned strings ("MAX" for a const, "Color.RED" for an enum member). */
+struct cconst_entry { struct ud_string *key; struct ud_value val; };
+struct cconst {
+    struct cconst_entry *items;
+    int count, cap;
+    struct ud_string **enums;  /* names known to be enums (for good errors) */
+    int enum_count, enum_cap;
 };
 
 struct loop {
     int start;            /* ip to jump back to for the next iteration      */
     int base_local;       /* local_count when the body scope began          */
+    int base_try;         /* try nesting depth when the loop began          */
     int *breaks;          /* patch list of break jump operand positions     */
     int break_count, break_cap;
     int *continues;       /* patch list of continue jump operand positions  */
@@ -36,8 +51,10 @@ struct compiler {
     struct local locals[256];
     int local_count;
     int scope_depth;
+    int try_depth;            /* number of `try` handlers armed at this point */
     int ret_dtype;            /* declared return type (DT_*) or DT_NONE */
     struct loop *loop;        /* innermost enclosing loop */
+    struct cconst *cc;        /* file-wide const/enum environment */
 };
 
 /* ------------------------------------------------------------------ */
@@ -136,6 +153,7 @@ static int add_local(struct compiler *c, struct ud_string *name) {
     int slot = c->local_count;
     c->locals[slot].name = name;
     c->locals[slot].depth = c->scope_depth;
+    c->locals[slot].is_const = 0;
     c->local_count++;
     if (c->local_count > c->fn->num_slots) c->fn->num_slots = c->local_count;
     return slot;
@@ -185,6 +203,175 @@ static void loop_add_continue(struct compiler *c, int pos) {
 static void compile_expr(struct compiler *c, struct ud_node *n);
 static void compile_stmt(struct compiler *c, struct ud_node *n);
 static void compile_block(struct compiler *c, struct ud_node *block);
+static void compile_incr(struct compiler *c, struct ud_node *n);
+static void compile_function_body(struct compiler *parent, struct ud_node *fnode,
+                                  struct ud_function *fn);
+
+/* ------------------------------------------------------------------ */
+/* Compile-time constants (const + enum)                              */
+/* ------------------------------------------------------------------ */
+
+static struct ud_string *enum_key(struct ud_string *ename, struct ud_string *member) {
+    return ud_str_concat(ud_str_concat(ename, ud_str_intern(".", 1)), member);
+}
+
+static int cconst_get(struct cconst *cc, struct ud_string *key, struct ud_value *out) {
+    if (!cc) return 0;
+    for (int i = 0; i < cc->count; i++)
+        if (cc->items[i].key == key) { if (out) *out = cc->items[i].val; return 1; }
+    return 0;
+}
+
+static void cconst_put(struct cconst *cc, struct ud_string *key,
+                       struct ud_value v, int line) {
+    if (cconst_get(cc, key, NULL))
+        ud_error(UDE_SYNTAX, line, "'%s' is already defined", key->chars);
+    if (cc->count + 1 > cc->cap) {
+        int nc = cc->cap < 8 ? 8 : cc->cap * 2;
+        struct cconst_entry *it =
+            (struct cconst_entry *)ud_alloc(sizeof(*it) * (size_t)nc);
+        if (cc->count) memcpy(it, cc->items, sizeof(*it) * (size_t)cc->count);
+        cc->items = it; cc->cap = nc;
+    }
+    cc->items[cc->count].key = key;
+    cc->items[cc->count].val = v;
+    cc->count++;
+}
+
+static int cconst_is_enum(struct cconst *cc, struct ud_string *name) {
+    if (!cc) return 0;
+    for (int i = 0; i < cc->enum_count; i++)
+        if (cc->enums[i] == name) return 1;
+    return 0;
+}
+
+static void cconst_add_enum(struct cconst *cc, struct ud_string *name) {
+    if (cc->enum_count + 1 > cc->enum_cap) {
+        int nc = cc->enum_cap < 8 ? 8 : cc->enum_cap * 2;
+        struct ud_string **e =
+            (struct ud_string **)ud_alloc(sizeof(*e) * (size_t)nc);
+        if (cc->enum_count) memcpy(e, cc->enums, sizeof(*e) * (size_t)cc->enum_count);
+        cc->enums = e; cc->enum_cap = nc;
+    }
+    cc->enums[cc->enum_count++] = name;
+}
+
+/* Fold a binary op over two already-folded constant operands (mirrors the VM's
+ * arithmetic exactly). Returns 0 if the combination isn't foldable. */
+static int fold_binary(int op, struct ud_value a, struct ud_value b,
+                       struct ud_value *out) {
+    switch (op) {
+        case T_PLUS: case T_MINUS: case T_STAR:
+            if (!UD_IS_NUM(a) || !UD_IS_NUM(b)) return 0;
+            if (UD_IS_INT(a) && UD_IS_INT(b)) {
+                long long x = a.as.i, y = b.as.i;
+                *out = ud_int(op == T_PLUS ? x + y : op == T_MINUS ? x - y : x * y);
+            } else {
+                double x = ud_as_number(a), y = ud_as_number(b);
+                *out = ud_float(op == T_PLUS ? x + y : op == T_MINUS ? x - y : x * y);
+            }
+            return 1;
+        case T_SLASH:
+            if (!UD_IS_NUM(a) || !UD_IS_NUM(b)) return 0;
+            if (UD_IS_INT(a) && UD_IS_INT(b)) {
+                if (b.as.i == 0) return 0;
+                *out = ud_int(a.as.i / b.as.i);
+            } else {
+                double y = ud_as_number(b); if (y == 0.0) return 0;
+                *out = ud_float(ud_as_number(a) / y);
+            }
+            return 1;
+        case T_PERCENT:
+            if (!UD_IS_NUM(a) || !UD_IS_NUM(b)) return 0;
+            if (UD_IS_INT(a) && UD_IS_INT(b)) {
+                if (b.as.i == 0) return 0;
+                *out = ud_int(a.as.i % b.as.i);
+            } else {
+                double y = ud_as_number(b); if (y == 0.0) return 0;
+                *out = ud_float(fmod(ud_as_number(a), y));
+            }
+            return 1;
+        case T_STARSTAR:
+            if (!UD_IS_NUM(a) || !UD_IS_NUM(b)) return 0;
+            if (UD_IS_INT(a) && UD_IS_INT(b) && b.as.i >= 0) {
+                long long r = 1, base = a.as.i, e = b.as.i;
+                while (e > 0) { if (e & 1) r *= base; base *= base; e >>= 1; }
+                *out = ud_int(r);
+            } else {
+                *out = ud_float(pow(ud_as_number(a), ud_as_number(b)));
+            }
+            return 1;
+        case T_AMP: case T_PIPE: case T_CARET: case T_SHL: case T_SHR: {
+            if (!UD_IS_INT(a) || !UD_IS_INT(b)) return 0;
+            long long x = a.as.i, y = b.as.i, r = 0;
+            switch (op) {
+                case T_AMP:   r = x & y;  break; case T_PIPE:  r = x | y; break;
+                case T_CARET: r = x ^ y;  break; case T_SHL:   r = x << y; break;
+                case T_SHR:   r = x >> y; break;
+            }
+            *out = ud_int(r);
+            return 1;
+        }
+        case T_CONCAT:
+            if (!UD_IS_STRING(a) || !UD_IS_STRING(b)) return 0;
+            *out = ud_obj_val((struct ud_obj *)
+                ud_str_concat(UD_AS_STRING(a), UD_AS_STRING(b)));
+            return 1;
+        case T_EQ: *out = ud_bool(ud_value_equal(a, b));  return 1;
+        case T_NE: *out = ud_bool(!ud_value_equal(a, b)); return 1;
+        case T_LT: case T_GT: case T_LE: case T_GE: {
+            if (!UD_IS_NUM(a) || !UD_IS_NUM(b)) return 0;
+            double x = ud_as_number(a), y = ud_as_number(b); int r = 0;
+            switch (op) {
+                case T_LT: r = x <  y; break; case T_GT: r = x >  y; break;
+                case T_LE: r = x <= y; break; case T_GE: r = x >= y; break;
+            }
+            *out = ud_bool(r);
+            return 1;
+        }
+        default: return 0;
+    }
+}
+
+/* Evaluate a constant expression at compile time. Returns 0 if the expression
+ * refers to anything not known at compile time. */
+static int fold_const(struct cconst *cc, struct ud_node *n, struct ud_value *out) {
+    switch (n->kind) {
+        case N_INT:    *out = ud_int(n->as.ival);   return 1;
+        case N_FLOAT:  *out = ud_float(n->as.fval);  return 1;
+        case N_BOOL:   *out = ud_bool(n->as.ival ? 1 : 0); return 1;
+        case N_NIL:    *out = ud_nil();              return 1;
+        case N_STRING: *out = ud_obj_val((struct ud_obj *)n->as.sval); return 1;
+        case N_IDENT:  return cconst_get(cc, n->as.sval, out);
+        case N_FIELD: {
+            struct ud_node *t = n->as.field.target;
+            if (t->kind != N_IDENT) return 0;
+            return cconst_get(cc, enum_key(t->as.sval, n->as.field.name), out);
+        }
+        case N_UNARY: {
+            struct ud_value v;
+            if (!fold_const(cc, n->as.unary.operand, &v)) return 0;
+            if (n->as.unary.op == T_MINUS) {
+                if (UD_IS_INT(v))   { *out = ud_int(-v.as.i);   return 1; }
+                if (UD_IS_FLOAT(v)) { *out = ud_float(-v.as.d); return 1; }
+                return 0;
+            }
+            if (n->as.unary.op == T_NOT) { *out = ud_bool(!ud_value_truthy(v)); return 1; }
+            if (n->as.unary.op == T_TILDE) {
+                if (!UD_IS_INT(v)) return 0;
+                *out = ud_int(~v.as.i); return 1;
+            }
+            return 0;
+        }
+        case N_BINARY: {
+            struct ud_value a, b;
+            if (!fold_const(cc, n->as.binary.left, &a))  return 0;
+            if (!fold_const(cc, n->as.binary.right, &b)) return 0;
+            return fold_binary(n->as.binary.op, a, b, out);
+        }
+        default: return 0;
+    }
+}
 
 /* map a binary token op to its arithmetic/comparison opcode */
 static int binop_opcode(int tok) {
@@ -198,6 +385,7 @@ static int binop_opcode(int tok) {
         case T_AMP: return OP_BAND;   case T_PIPE: return OP_BOR;
         case T_CARET: return OP_BXOR; case T_SHL: return OP_SHL;
         case T_SHR: return OP_SHR;    case T_CONCAT: return OP_CONCAT;
+        case T_IN: return OP_IN;
         default: return OP_HALT;
     }
 }
@@ -254,10 +442,15 @@ static void compile_variable_get(struct compiler *c, struct ud_string *name, int
     if (slot >= 0) {
         emit_byte(c, OP_GET_LOCAL, line);
         emit_byte(c, (uint8_t)slot, line);
-    } else {
-        emit_byte(c, OP_GET_GLOBAL, line);
-        emit_u16(c, add_const(c, ud_obj_val((struct ud_obj *)name)), line);
+        return;
     }
+    struct ud_value cv;
+    if (cconst_get(c->cc, name, &cv)) { /* file-level named constant */
+        emit_const(c, cv, line);
+        return;
+    }
+    emit_byte(c, OP_GET_GLOBAL, line);
+    emit_u16(c, add_const(c, ud_obj_val((struct ud_obj *)name)), line);
 }
 
 static void compile_call(struct compiler *c, struct ud_node *n) {
@@ -311,6 +504,22 @@ static void compile_expr(struct compiler *c, struct ud_node *n) {
             emit_u16(c, n->as.array.elems.count, n->line);
             break;
 
+        case N_DICT:
+            for (int i = 0; i < n->as.dict.keys.count; i++) {
+                compile_expr(c, n->as.dict.keys.items[i]);
+                compile_expr(c, n->as.dict.vals.items[i]);
+            }
+            emit_byte(c, OP_DICT, n->line);
+            emit_u16(c, n->as.dict.keys.count, n->line);
+            break;
+
+        case N_SET:
+            for (int i = 0; i < n->as.set.elems.count; i++)
+                compile_expr(c, n->as.set.elems.items[i]);
+            emit_byte(c, OP_SET, n->line);
+            emit_u16(c, n->as.set.elems.count, n->line);
+            break;
+
         case N_UNARY:
             compile_expr(c, n->as.unary.operand);
             if (n->as.unary.op == T_MINUS)      emit_byte(c, OP_NEG, n->line);
@@ -339,6 +548,19 @@ static void compile_expr(struct compiler *c, struct ud_node *n) {
             break;
         }
 
+        case N_TERNARY: {
+            compile_expr(c, n->as.ternary.cond);
+            int to_else = emit_jump(c, OP_JUMP_IF_FALSE, n->line);
+            compile_expr(c, n->as.ternary.then);
+            int to_end = emit_jump(c, OP_JUMP, n->line);
+            patch_jump(c, to_else);
+            compile_expr(c, n->as.ternary.els);
+            patch_jump(c, to_end);
+            break;
+        }
+
+        case N_INCR: compile_incr(c, n); break;
+
         case N_CALL: compile_call(c, n); break;
 
         case N_INDEX:
@@ -356,11 +578,23 @@ static void compile_expr(struct compiler *c, struct ud_node *n) {
                                    (n->as.slice.stop ? 2 : 0)), n->line);
             break;
 
-        case N_FIELD:
-            compile_expr(c, n->as.field.target);
+        case N_FIELD: {
+            struct ud_node *t = n->as.field.target;
+            /* Enum member access `Color.RED` folds to its constant value. */
+            if (t->kind == N_IDENT && resolve_local(c, t->as.sval) < 0 &&
+                cconst_is_enum(c->cc, t->as.sval)) {
+                struct ud_value ev;
+                if (!cconst_get(c->cc, enum_key(t->as.sval, n->as.field.name), &ev))
+                    ud_error(UDE_FIELD, n->line, "enum %s has no member '%s'",
+                             t->as.sval->chars, n->as.field.name->chars);
+                emit_const(c, ev, n->line);
+                break;
+            }
+            compile_expr(c, t);
             emit_byte(c, OP_FIELD_GET, n->line);
             emit_u16(c, add_const(c, ud_obj_val((struct ud_obj *)n->as.field.name)), n->line);
             break;
+        }
 
         case N_METHOD:
             compile_expr(c, n->as.method.target);
@@ -370,6 +604,21 @@ static void compile_expr(struct compiler *c, struct ud_node *n) {
             emit_u16(c, add_const(c, ud_obj_val((struct ud_obj *)n->as.method.name)), n->line);
             emit_byte(c, (uint8_t)n->as.method.args.count, n->line);
             break;
+
+        case N_LAMBDA: {
+            /* Compile the anonymous function into its own chunk and push it as a
+             * constant. The VM's ordinary OP_CALL path invokes function values
+             * on the stack, so a lambda is a first-class value for free. */
+            struct ud_string *lname = n->as.func.name
+                                    ? n->as.func.name : ud_str_intern("lambda", 6);
+            struct ud_function *fn = ud_function_new(lname);
+            fn->arity = n->as.func.params.count;
+            fn->param_types = n->as.func.ptypes;
+            fn->return_type = n->as.func.has_ret ? n->as.func.rtype : 0xFF;
+            compile_function_body(c, n, fn);
+            emit_const(c, ud_obj_val((struct ud_obj *)fn), n->line);
+            break;
+        }
 
         default:
             ud_error(UDE_INTERNAL, n->line, "cannot compile this expression");
@@ -399,6 +648,8 @@ static void compile_assign(struct compiler *c, struct ud_node *n) {
     if (target->kind == N_IDENT) {
         struct ud_string *name = target->as.sval;
         int slot = resolve_local(c, name);
+        if (slot >= 0 && c->locals[slot].is_const)
+            ud_error(UDE_SYNTAX, line, "cannot assign to constant '%s'", name->chars);
         if (op == T_ASSIGN) {
             if (slot >= 0) {
                 compile_expr(c, n->as.assign.value);
@@ -463,11 +714,64 @@ static void compile_assign(struct compiler *c, struct ud_node *n) {
     }
 }
 
+/* ++target (prefix leaves the new value, postfix leaves the old value). */
+static void compile_incr(struct compiler *c, struct ud_node *n) {
+    struct ud_node *t = n->as.incr.target;
+    int prefix = n->as.incr.is_prefix, line = n->line;
+    if (t->kind == N_IDENT) {
+        int slot = resolve_local(c, t->as.sval);
+        if (slot < 0)
+            ud_error(UDE_UNDEF_VAR, line,
+                     "'%s' must be a local variable to use '++'", t->as.sval->chars);
+        if (c->locals[slot].is_const)
+            ud_error(UDE_SYNTAX, line, "cannot modify constant '%s' with '++'", t->as.sval->chars);
+        if (!prefix) { emit_byte(c, OP_GET_LOCAL, line); emit_byte(c, (uint8_t)slot, line); }
+        emit_byte(c, OP_GET_LOCAL, line); emit_byte(c, (uint8_t)slot, line);
+        emit_const(c, ud_int(1), line);
+        emit_byte(c, OP_ADD, line);
+        emit_byte(c, OP_SET_LOCAL, line); emit_byte(c, (uint8_t)slot, line);
+        if (!prefix) emit_byte(c, OP_POP, line); /* drop new, leave old */
+    } else if (t->kind == N_INDEX) {
+        if (!prefix) {
+            compile_expr(c, t->as.index.target);
+            compile_expr(c, t->as.index.index);
+            emit_byte(c, OP_INDEX_GET, line); /* old, kept as result */
+        }
+        compile_expr(c, t->as.index.target);
+        compile_expr(c, t->as.index.index);
+        compile_expr(c, t->as.index.target);
+        compile_expr(c, t->as.index.index);
+        emit_byte(c, OP_INDEX_GET, line);
+        emit_const(c, ud_int(1), line);
+        emit_byte(c, OP_ADD, line);
+        emit_byte(c, OP_INDEX_SET, line);
+        if (!prefix) emit_byte(c, OP_POP, line);
+    } else if (t->kind == N_FIELD) {
+        int fc = add_const(c, ud_obj_val((struct ud_obj *)t->as.field.name));
+        if (!prefix) {
+            compile_expr(c, t->as.field.target);
+            emit_byte(c, OP_FIELD_GET, line); emit_u16(c, fc, line);
+        }
+        compile_expr(c, t->as.field.target);
+        compile_expr(c, t->as.field.target);
+        emit_byte(c, OP_FIELD_GET, line); emit_u16(c, fc, line);
+        emit_const(c, ud_int(1), line);
+        emit_byte(c, OP_ADD, line);
+        emit_byte(c, OP_FIELD_SET, line); emit_u16(c, fc, line);
+        if (!prefix) emit_byte(c, OP_POP, line);
+    } else {
+        ud_error(UDE_SYNTAX, line, "'++' needs a variable, index, or field");
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* break / continue helpers                                           */
 /* ------------------------------------------------------------------ */
 
 static void emit_loop_exit_pops(struct compiler *c, int line) {
+    /* disarm any try-handlers opened inside the loop before jumping out of it */
+    int t = c->try_depth - c->loop->base_try;
+    for (int i = 0; i < t; i++) emit_byte(c, OP_POP_TRY, line);
     int n = c->local_count - c->loop->base_local;
     for (int i = 0; i < n; i++) emit_byte(c, OP_POP, line);
 }
@@ -501,7 +805,8 @@ static void compile_vardecl(struct compiler *c, struct ud_node *n) {
     } else {
         default_for_type(c, dtype, n->line);
     }
-    add_local(c, n->as.vardecl.name); /* value stays on the stack as the slot */
+    int slot = add_local(c, n->as.vardecl.name); /* value stays on the stack as the slot */
+    if (n->as.vardecl.is_const) c->locals[slot].is_const = 1;
 }
 
 static void compile_if(struct compiler *c, struct ud_node *n) {
@@ -528,6 +833,7 @@ static void compile_if(struct compiler *c, struct ud_node *n) {
 static void begin_loop(struct compiler *c, struct loop *lp, int start) {
     lp->start = start;
     lp->base_local = c->local_count;
+    lp->base_try = c->try_depth;
     lp->breaks = NULL; lp->break_count = lp->break_cap = 0;
     lp->continues = NULL; lp->continue_count = lp->continue_cap = 0;
     lp->prev = c->loop;
@@ -637,6 +943,7 @@ static void compile_forin(struct compiler *c, struct ud_node *n) {
     int line = n->line;
     begin_scope(c);
     compile_expr(c, n->as.forin.iter);
+    emit_byte(c, OP_ITER_KEYS, line); /* normalize dict/set to an element array */
     int iter_slot = add_anon_local(c);
     emit_const(c, ud_int(0), line);
     int idx_slot = add_anon_local(c);
@@ -678,6 +985,96 @@ static void compile_forin(struct compiler *c, struct ud_node *n) {
     end_scope(c); /* pops iter, idx, var */
 }
 
+/* a, b, c = <array>  -- destructure an array (from a multi-return call or a
+ * literal) into several targets. The source array is stashed in an anonymous
+ * local; each target pulls its element by index. */
+static void compile_multivardecl(struct compiler *c, struct ud_node *n) {
+    int line = n->line;
+    int ntargets = n->as.multi.names.count;
+    compile_expr(c, n->as.multi.init);   /* source array stays on the stack */
+    int src = add_anon_local(c);
+    for (int i = 0; i < ntargets; i++) {
+        struct ud_node *tgt = n->as.multi.names.items[i];
+        if (tgt->kind == N_IDENT) {
+            int slot = resolve_local(c, tgt->as.sval);
+            if (slot >= 0 && c->locals[slot].is_const)
+                ud_error(UDE_SYNTAX, line, "cannot assign to constant '%s'",
+                         tgt->as.sval->chars);
+            emit_byte(c, OP_GET_LOCAL, line); emit_byte(c, (uint8_t)src, line);
+            emit_const(c, ud_int(i), line);
+            emit_byte(c, OP_INDEX_GET, line);
+            if (slot >= 0) {
+                emit_byte(c, OP_SET_LOCAL, line); emit_byte(c, (uint8_t)slot, line);
+                emit_byte(c, OP_POP, line);
+            } else {
+                add_local(c, tgt->as.sval); /* the element becomes the new local */
+            }
+        } else if (tgt->kind == N_INDEX) {
+            compile_expr(c, tgt->as.index.target);
+            compile_expr(c, tgt->as.index.index);
+            emit_byte(c, OP_GET_LOCAL, line); emit_byte(c, (uint8_t)src, line);
+            emit_const(c, ud_int(i), line);
+            emit_byte(c, OP_INDEX_GET, line);
+            emit_byte(c, OP_INDEX_SET, line);
+            emit_byte(c, OP_POP, line);
+        } else if (tgt->kind == N_FIELD) {
+            int fc = add_const(c, ud_obj_val((struct ud_obj *)tgt->as.field.name));
+            compile_expr(c, tgt->as.field.target);
+            emit_byte(c, OP_GET_LOCAL, line); emit_byte(c, (uint8_t)src, line);
+            emit_const(c, ud_int(i), line);
+            emit_byte(c, OP_INDEX_GET, line);
+            emit_byte(c, OP_FIELD_SET, line); emit_u16(c, fc, line);
+            emit_byte(c, OP_POP, line);
+        } else {
+            ud_error(UDE_SYNTAX, line,
+                     "each target on the left of '=' must be a name, index, or field");
+        }
+    }
+}
+
+/* try/catch. OP_TRY arms a handler pointing at the catch clause; on the normal
+ * path OP_POP_TRY disarms it and a jump skips the handler. When an error unwinds
+ * into the handler the VM has already pushed the error value, so a bound catch
+ * variable simply *is* that fresh local. */
+static void compile_try(struct compiler *c, struct ud_node *n) {
+    int line = n->line;
+    int baseline = c->local_count;         /* the catch var (if any) lands here */
+    int has_var = n->as.trycatch.errname != NULL;
+    if (has_var && baseline >= 0xFF)
+        ud_error(UDE_INTERNAL, line, "too many locals surrounding a try/catch");
+
+    emit_byte(c, OP_TRY, line);
+    emit_byte(c, (uint8_t)(has_var ? baseline : 0xFF), line);
+    int catch_off_pos = c->fn->code_len;   /* u16 patched to the catch clause */
+    emit_byte(c, 0xFF, line);
+    emit_byte(c, 0xFF, line);
+
+    c->try_depth++;
+    begin_scope(c);
+    compile_block(c, n->as.trycatch.body);
+    end_scope(c);
+    c->try_depth--;
+
+    emit_byte(c, OP_POP_TRY, line);        /* normal completion disarms it */
+    int over = emit_jump(c, OP_JUMP, line);/* and skips the catch clause      */
+
+    patch_jump(c, catch_off_pos);          /* OP_TRY's offset -> here          */
+    begin_scope(c);
+    if (has_var)
+        add_local(c, n->as.trycatch.errname); /* pushed error becomes the local */
+    else
+        emit_byte(c, OP_POP, line);           /* no variable: drop the error    */
+    compile_block(c, n->as.trycatch.handler);
+    end_scope(c);
+
+    patch_jump(c, over);                    /* normal path resumes after catch */
+}
+
+static void compile_throw(struct compiler *c, struct ud_node *n) {
+    compile_expr(c, n->as.expr);
+    emit_byte(c, OP_THROW, n->line);
+}
+
 static void compile_stmt(struct compiler *c, struct ud_node *n) {
     switch (n->kind) {
         case N_EXPRSTMT:
@@ -685,6 +1082,7 @@ static void compile_stmt(struct compiler *c, struct ud_node *n) {
             emit_byte(c, OP_POP, n->line);
             break;
         case N_VARDECL: compile_vardecl(c, n); break;
+        case N_MULTIVARDECL: compile_multivardecl(c, n); break;
         case N_ASSIGN:  compile_assign(c, n); break;
         case N_IF:      compile_if(c, n); break;
         case N_WHILE:   compile_while(c, n); break;
@@ -717,6 +1115,8 @@ static void compile_stmt(struct compiler *c, struct ud_node *n) {
             compile_block(c, n);
             end_scope(c);
             break;
+        case N_TRY:   compile_try(c, n); break;
+        case N_THROW: compile_throw(c, n); break;
         default:
             ud_error(UDE_INTERNAL, n->line, "cannot compile this statement");
     }
@@ -738,8 +1138,10 @@ static void compile_function_body(struct compiler *parent, struct ud_node *fnode
     c.fn = fn;
     c.local_count = 0;
     c.scope_depth = 0;
+    c.try_depth = 0;
     c.ret_dtype = fnode->as.func.has_ret ? fnode->as.func.rtype : DT_NONE;
     c.loop = NULL;
+    c.cc = parent->cc;
 
     /* parameters occupy the first slots */
     for (int i = 0; i < fnode->as.func.params.count; i++)
@@ -754,18 +1156,54 @@ static void compile_function_body(struct compiler *parent, struct ud_node *fnode
 }
 
 void ud_compile(struct ud_node *program, struct ud_program *prog) {
+    struct cconst cc;
+    memset(&cc, 0, sizeof(cc));
+
     struct compiler top;
     top.prog = prog;
     top.fn = NULL;
     top.local_count = 0;
     top.scope_depth = 0;
+    top.try_depth = 0;
     top.ret_dtype = DT_NONE;
     top.loop = NULL;
+    top.cc = &cc;
 
     /* pass 1: register every function and struct as a global so calls resolve
-     * regardless of source order. */
+     * regardless of source order; fold enums and file-level consts to values. */
     for (int i = 0; i < program->as.block.count; i++) {
         struct ud_node *d = program->as.block.items[i];
+        if (d->kind == N_ENUM) {
+            cconst_add_enum(&cc, d->as.enumdef.name);
+            long long next = 0;
+            for (int j = 0; j < d->as.enumdef.names.count; j++) {
+                struct ud_string *mem = d->as.enumdef.names.items[j]->as.sval;
+                struct ud_node *ve = d->as.enumdef.vals.items[j];
+                long long value;
+                if (ve) {
+                    struct ud_value v;
+                    if (!fold_const(&cc, ve, &v) || !UD_IS_INT(v))
+                        ud_error(UDE_SYNTAX, d->line,
+                                 "enum %s member '%s' must be a constant integer",
+                                 d->as.enumdef.name->chars, mem->chars);
+                    value = v.as.i;
+                } else {
+                    value = next;
+                }
+                cconst_put(&cc, enum_key(d->as.enumdef.name, mem), ud_int(value), d->line);
+                next = value + 1;
+            }
+            continue;
+        }
+        if (d->kind == N_VARDECL && d->as.vardecl.is_const) {
+            struct ud_value v;
+            if (!fold_const(&cc, d->as.vardecl.init, &v))
+                ud_error(UDE_SYNTAX, d->line,
+                         "the value of constant '%s' must be a constant expression",
+                         d->as.vardecl.name->chars);
+            cconst_put(&cc, d->as.vardecl.name, v, d->line);
+            continue;
+        }
         if (d->kind == N_FUNC) {
             struct ud_function *fn = ud_function_new(d->as.func.name);
             fn->arity = d->as.func.params.count;

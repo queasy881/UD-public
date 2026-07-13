@@ -38,6 +38,7 @@ enum ud_errcode {
     UDE_ATTR            = 19, /* unknown method/attribute on a value          */
     UDE_NOT_CALLABLE    = 20, /* attempted to call a non-function value       */
     UDE_CONVERT         = 21, /* invalid explicit type conversion             */
+    UDE_THROWN          = 22, /* a value raised by `throw` reached the top     */
     UDE_INTERNAL        = 99  /* should-never-happen guard                    */
 };
 
@@ -45,6 +46,25 @@ enum ud_errcode {
  * anything; ud_error() longjmps here with the error code as the return value. */
 extern jmp_buf ud_error_jmp;
 extern int     ud_had_error;
+
+/* try/catch plumbing. When the VM arms a `try`, it points ud_catch_current at
+ * that handler's jmp_buf; ud_error()/ud_raise() then longjmp there (stashing the
+ * details in ud_pending_error) instead of unwinding to the top level. NULL means
+ * "no handler armed" -- errors are fatal and reported as before. */
+struct ud_errinfo {
+    int  code;
+    int  line;
+    int  has_value;         /* 1 when a `throw`n UD value is waiting in the VM */
+    char message[480];
+};
+extern struct ud_errinfo ud_pending_error;
+extern jmp_buf          *ud_catch_current;
+
+/* Raise a pre-formatted, catchable error (used by `throw`). Never returns. */
+#if defined(__GNUC__)
+__attribute__((noreturn))
+#endif
+void ud_raise(enum ud_errcode code, int line, const char *message, int has_value);
 
 /* Report an error and unwind. `line` may be 0 when no source location applies.
  * Never returns. */

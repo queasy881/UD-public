@@ -24,15 +24,16 @@ enum ud_decltype {
 enum ud_nodekind {
     /* expressions */
     N_INT, N_FLOAT, N_STRING, N_BOOL, N_NIL,
-    N_IDENT, N_ARRAY,
-    N_BINARY, N_UNARY, N_LOGICAL,
-    N_CALL, N_INDEX, N_SLICE, N_FIELD, N_METHOD,
+    N_IDENT, N_ARRAY, N_DICT, N_SET,
+    N_BINARY, N_UNARY, N_LOGICAL, N_TERNARY, N_INCR,
+    N_CALL, N_INDEX, N_SLICE, N_FIELD, N_METHOD, N_LAMBDA,
     /* statements */
-    N_EXPRSTMT, N_VARDECL, N_ASSIGN,
+    N_EXPRSTMT, N_VARDECL, N_ASSIGN, N_MULTIVARDECL,
     N_IF, N_WHILE, N_FORRANGE, N_FORIN,
     N_RETURN, N_BREAK, N_CONTINUE, N_BLOCK,
+    N_TRY, N_THROW,
     /* declarations */
-    N_FUNC, N_STRUCT
+    N_FUNC, N_STRUCT, N_ENUM
 };
 
 struct ud_node;
@@ -52,9 +53,13 @@ struct ud_node {
         struct ud_string  *sval;   /* N_STRING literal, or N_IDENT name */
 
         struct { struct ud_nodelist elems; } array;                 /* N_ARRAY */
+        struct { struct ud_nodelist keys, vals; } dict;             /* N_DICT   */
+        struct { struct ud_nodelist elems; } set;                   /* N_SET    */
         struct { int op; struct ud_node *left, *right; } binary;    /* N_BINARY: op is a token type */
         struct { int op; struct ud_node *operand; } unary;          /* N_UNARY  */
         struct { int op; struct ud_node *left, *right; } logical;   /* N_LOGICAL: T_AND / T_OR */
+        struct { struct ud_node *cond, *then, *els; } ternary;      /* N_TERNARY */
+        struct { struct ud_node *target; uint8_t is_prefix; } incr; /* N_INCR: ++target */
 
         struct { struct ud_node *callee; struct ud_nodelist args; } call;   /* N_CALL */
         struct { struct ud_node *target, *index; } index;                   /* N_INDEX */
@@ -66,7 +71,7 @@ struct ud_node {
         struct ud_node *expr;      /* N_EXPRSTMT value, N_RETURN value (may be NULL) */
 
         struct { uint8_t dtype; struct ud_node *init; struct ud_string *name;
-                 int is_typed; } vardecl;                                   /* N_VARDECL */
+                 int is_typed; uint8_t is_const; } vardecl;                 /* N_VARDECL */
         struct { int op; struct ud_node *target, *value; } assign;          /* N_ASSIGN: op token */
 
         struct { struct ud_nodelist conds; struct ud_nodelist bodies;
@@ -78,9 +83,16 @@ struct ud_node {
         struct ud_nodelist block;  /* N_BLOCK */
 
         struct { struct ud_string *name; struct ud_nodelist params; uint8_t *ptypes;
-                 uint8_t rtype; int has_ret; struct ud_node *body; } func;  /* N_FUNC */
+                 uint8_t rtype; int has_ret; struct ud_node *body; } func;  /* N_FUNC, N_LAMBDA */
         struct { struct ud_string *name; struct ud_nodelist fields;
                  uint8_t *ftypes; } strct;                                  /* N_STRUCT */
+
+        struct { struct ud_nodelist names; struct ud_node *init;
+                 int is_typed; uint8_t dtype; } multi;                      /* N_MULTIVARDECL: a, b = ... */
+        struct { struct ud_node *body; struct ud_string *errname;
+                 struct ud_node *handler; } trycatch;                       /* N_TRY */
+        struct { struct ud_string *name; struct ud_nodelist names;
+                 struct ud_nodelist vals; } enumdef;                        /* N_ENUM */
     } as;
 };
 

@@ -127,14 +127,37 @@ EOF
 fi
 
 # --- 6. install the VS Code extension ----------------------------------------
+# Prefer the `code` CLI with a .vsix: that writes VS Code's extensions.json
+# cache, which a raw folder-copy skips (so a copied folder never activates).
 if [ -d "$SRC_DIR/editor/vscode" ]; then
-    for extroot in "$HOME/.vscode/extensions" "$HOME/.vscode-insiders/extensions"; do
-        base="$(dirname "$extroot")"
-        [ -d "$base" ] || continue
-        mkdir -p "$extroot/ud-lang"
-        cp -R "$SRC_DIR/editor/vscode/." "$extroot/ud-lang/"
-        say "Installed the VS Code extension into $extroot/ud-lang"
+    vsdir="$SRC_DIR/editor/vscode"
+    code_cli=""
+    for c in code code-insiders; do
+        if command -v "$c" >/dev/null 2>&1; then code_cli="$c"; break; fi
     done
+    if [ -n "$code_cli" ]; then
+        # Build a fresh .vsix if Python is on hand; else use the shipped one.
+        for p in python3 python; do
+            if command -v "$p" >/dev/null 2>&1; then "$p" "$vsdir/make_vsix.py" "$vsdir" || true; break; fi
+        done
+        vsix="$(ls -t "$vsdir"/*.vsix 2>/dev/null | head -n1 || true)"
+        if [ -n "$vsix" ] && "$code_cli" --install-extension "$vsix" --force; then
+            say "Installed the VS Code extension via $code_cli"
+        else
+            code_cli=""
+        fi
+    fi
+    if [ -z "$code_cli" ]; then
+        for extroot in "$HOME/.vscode/extensions" "$HOME/.vscode-insiders/extensions"; do
+            base="$(dirname "$extroot")"
+            [ -d "$base" ] || continue
+            dest="$extroot/ud.ud-lang-1.0.0"
+            mkdir -p "$dest"
+            cp -R "$vsdir/." "$dest/"
+            rm -f "$dest/make_vsix.py" "$dest"/*.vsix
+            say "Copied the VS Code extension into $dest (restart VS Code to load it)"
+        done
+    fi
 fi
 
 # --- 7. self-check -----------------------------------------------------------

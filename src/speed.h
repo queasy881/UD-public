@@ -85,7 +85,10 @@ enum ud_obj_type {
     OBJ_FUNCTION,
     OBJ_NATIVE,
     OBJ_STRUCTDEF,
-    OBJ_STRUCT
+    OBJ_STRUCT,
+    OBJ_MODULE,
+    OBJ_DICT,
+    OBJ_SET
 };
 
 struct ud_obj {
@@ -155,6 +158,9 @@ struct ud_struct {
 #define UD_IS_NATIVE(v)  (UD_IS_OBJ(v) && UD_OBJ_TYPE(v) == OBJ_NATIVE)
 #define UD_IS_STRUCTDEF(v)(UD_IS_OBJ(v) && UD_OBJ_TYPE(v) == OBJ_STRUCTDEF)
 #define UD_IS_STRUCT(v)  (UD_IS_OBJ(v) && UD_OBJ_TYPE(v) == OBJ_STRUCT)
+#define UD_IS_MODULE(v)  (UD_IS_OBJ(v) && UD_OBJ_TYPE(v) == OBJ_MODULE)
+#define UD_IS_DICT(v)    (UD_IS_OBJ(v) && UD_OBJ_TYPE(v) == OBJ_DICT)
+#define UD_IS_SET(v)     (UD_IS_OBJ(v) && UD_OBJ_TYPE(v) == OBJ_SET)
 
 #define UD_AS_STRING(v)  ((struct ud_string *)UD_AS_OBJ(v))
 #define UD_AS_ARRAY(v)   ((struct ud_array *)UD_AS_OBJ(v))
@@ -162,6 +168,9 @@ struct ud_struct {
 #define UD_AS_NATIVE(v)  ((struct ud_native *)UD_AS_OBJ(v))
 #define UD_AS_STRUCTDEF(v)((struct ud_structdef *)UD_AS_OBJ(v))
 #define UD_AS_STRUCT(v)  ((struct ud_struct *)UD_AS_OBJ(v))
+#define UD_AS_MODULE(v)  ((struct ud_module *)UD_AS_OBJ(v))
+#define UD_AS_DICT(v)    ((struct ud_dict *)UD_AS_OBJ(v))
+#define UD_AS_SET(v)     ((struct ud_set *)UD_AS_OBJ(v))
 
 /* ------------------------------------------------------------------ */
 /* Arena allocator                                                    */
@@ -232,6 +241,40 @@ void ud_map_set(struct ud_map *m, struct ud_string *key, struct ud_value val);
 int  ud_map_has(struct ud_map *m, struct ud_string *key);
 
 /* ------------------------------------------------------------------ */
+/* Module / dict / set object bodies (need struct ud_map above)       */
+/* ------------------------------------------------------------------ */
+
+/* A namespace of named values (math, random, regex, enums). Members are looked
+ * up by interned-string name, so `math.pi` and `math.sqrt(x)` both resolve here. */
+struct ud_module {
+    struct ud_obj obj;
+    struct ud_string *name;
+    struct ud_map members;
+};
+
+/* Value-keyed hash map (any int/float/bool/string/nil/object as key). Insertion
+ * order is remembered in `order` so iteration and printing are stable. */
+struct ud_dict_entry {
+    struct ud_value key;
+    struct ud_value val;
+    uint8_t state; /* 0 empty, 1 used, 2 tombstone */
+};
+struct ud_dict {
+    struct ud_obj obj;
+    int count;
+    int cap;
+    struct ud_dict_entry *entries;
+    struct ud_value *order;   /* keys in insertion order (may hold removed keys) */
+    int order_count, order_cap;
+};
+
+/* A set of unique values, backed by a dict (key present == member). */
+struct ud_set {
+    struct ud_obj obj;
+    struct ud_dict *backing;
+};
+
+/* ------------------------------------------------------------------ */
 /* Object constructors                                                */
 /* ------------------------------------------------------------------ */
 
@@ -242,6 +285,20 @@ struct ud_native   *ud_native_new(const char *name, int arity,
                                   struct ud_value (*fn)(int, struct ud_value *, int));
 struct ud_structdef *ud_structdef_new(struct ud_string *name, int field_count);
 struct ud_struct    *ud_struct_new(struct ud_structdef *def);
+
+struct ud_module   *ud_module_new(struct ud_string *name);
+void                ud_module_set(struct ud_module *m, const char *name, struct ud_value v);
+
+struct ud_dict     *ud_dict_new(void);
+int   ud_dict_get(struct ud_dict *d, struct ud_value key, struct ud_value *out);
+void  ud_dict_set(struct ud_dict *d, struct ud_value key, struct ud_value val);
+int   ud_dict_remove(struct ud_dict *d, struct ud_value key);
+uint32_t ud_value_hash(struct ud_value v);
+
+struct ud_set      *ud_set_new(void);
+int   ud_set_has(struct ud_set *s, struct ud_value v);
+void  ud_set_add(struct ud_set *s, struct ud_value v);
+int   ud_set_remove(struct ud_set *s, struct ud_value v);
 
 /* ------------------------------------------------------------------ */
 /* VM value stack                                                     */

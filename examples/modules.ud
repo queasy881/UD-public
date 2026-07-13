@@ -1,0 +1,11 @@
+-- require() pulls another file's top-level definitions into this program at
+-- compile time (paths are relative to this file), so a built .ldx stays
+-- self-contained -- it carries the module with it.
+require("geometry.ud")
+
+int function entry()
+    cout("circle r=2 area = " .. circle_area(2))
+    cout("rect 3x4 area   = " .. rect_area(3, 4))
+    cout("PI from module  = " .. PI)
+    return 0
+end

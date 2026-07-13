@@ -95,7 +95,7 @@ static void compile_file(const char *path, struct ud_program *prog) {
     char *src = read_file(path);
     int ntok = 0;
     struct ud_token *toks = ud_lex(src, &ntok);
-    struct ud_node *ast = ud_parse(toks, ntok);
+    struct ud_node *ast = ud_parse(toks, ntok, path);
     ud_compile(ast, prog);
     /* The AST/bytecode keeps only interned strings, so the raw source and token
      * buffers are safe to release now. */

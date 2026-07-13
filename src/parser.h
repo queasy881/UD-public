@@ -10,6 +10,8 @@
 #include "ast.h"
 #include "lexer.h"
 
-struct ud_node *ud_parse(struct ud_token *toks, int count);
+/* `path` is the source file's path (or NULL), used to resolve require() imports
+ * relative to it; pass NULL when parsing source that has no file of origin. */
+struct ud_node *ud_parse(struct ud_token *toks, int count, const char *path);
 
 #endif /* UD_PARSER_H */

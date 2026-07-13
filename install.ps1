@@ -60,14 +60,23 @@ foreach ($ico in @("ud-source.ico", "ud-bytecode.ico")) {
     if (Test-Path $from) { Copy-Item -Force $from (Join-Path $AssetDir $ico) }
 }
 
-# --- 4. put it on the user PATH ---------------------------------------------
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+# --- 4. put it on the user PATH (registry, so `ud` works in every terminal) --
+# Write HKCU\Environment\Path directly as REG_EXPAND_SZ so existing %VAR% entries
+# keep expanding, then broadcast WM_SETTINGCHANGE so open shells/Explorer refresh.
+$envKey   = "HKCU:\Environment"
+$userPath = (Get-ItemProperty -Path $envKey -Name Path -ErrorAction SilentlyContinue).Path
 if ($null -eq $userPath) { $userPath = "" }
-if (($userPath -split ";") -notcontains $BinDir) {
+if (($userPath -split ";" | ForEach-Object { $_.TrimEnd("\") }) -notcontains $BinDir.TrimEnd("\")) {
     $newPath = if ($userPath.TrimEnd(";") -eq "") { $BinDir } else { $userPath.TrimEnd(";") + ";" + $BinDir }
-    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    New-ItemProperty -Path $envKey -Name Path -Value $newPath -PropertyType ExpandString -Force | Out-Null
+    $sig = '[DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);'
+    $bc = Add-Type -MemberDefinition $sig -Name Win32SendMsg -Namespace UDInstall -PassThru
+    $out = [UIntPtr]::Zero
+    [void]$bc::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$out)
     $env:Path = "$env:Path;$BinDir"
     Say "Added $BinDir to your user PATH"
+} else {
+    Say "$BinDir already on your user PATH"
 }
 
 # --- 5. associate .ud and .ldx files (per-user registry, no admin) ----------
@@ -95,15 +104,43 @@ Say "Associated .ud and .ldx files (with icons)"
 try { & "$env:SystemRoot\System32\ie4uinit.exe" -show 2>$null } catch {}
 
 # --- 6. install the VS Code extension ----------------------------------------
+# Prefer the `code` CLI with a .vsix: that writes VS Code's extensions.json
+# cache, which a raw folder-copy skips (so a copied folder never activates).
 $vsSrc = Join-Path $Src "editor\vscode"
 if (Test-Path $vsSrc) {
-    foreach ($root in @("$env:USERPROFILE\.vscode\extensions", "$env:USERPROFILE\.vscode-insiders\extensions")) {
-        $base = Split-Path $root -Parent
-        if (-not (Test-Path $base)) { continue }
-        $dest = Join-Path $root "ud-lang"
-        New-Item -ItemType Directory -Force -Path $dest | Out-Null
-        Copy-Item -Recurse -Force (Join-Path $vsSrc "*") $dest
-        Say "Installed the VS Code extension into $dest"
+    $codeCli = $null
+    foreach ($c in @("code", "code-insiders")) {
+        if (Get-Command $c -ErrorAction SilentlyContinue) { $codeCli = $c; break }
+    }
+    if ($codeCli) {
+        # Build a fresh .vsix if Python is on hand; otherwise use the one shipped
+        # in the repo. Either way we install through the CLI.
+        $py = $null
+        foreach ($p in @("python", "py", "python3")) {
+            if (Get-Command $p -ErrorAction SilentlyContinue) { $py = $p; break }
+        }
+        if ($py) { & $py (Join-Path $vsSrc "make_vsix.py") $vsSrc 2>$null | Out-Null }
+        $vsix = Get-ChildItem (Join-Path $vsSrc "*.vsix") -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($vsix) {
+            & $codeCli --install-extension $vsix.FullName --force
+            if ($LASTEXITCODE -eq 0) { Say "Installed the VS Code extension via $codeCli" }
+            else { Warn "$codeCli could not install the .vsix; falling back to a folder copy."; $codeCli = $null }
+        } else {
+            Warn "No .vsix found or built; falling back to a folder copy."
+            $codeCli = $null
+        }
+    }
+    if (-not $codeCli) {
+        foreach ($root in @("$env:USERPROFILE\.vscode\extensions", "$env:USERPROFILE\.vscode-insiders\extensions")) {
+            $base = Split-Path $root -Parent
+            if (-not (Test-Path $base)) { continue }
+            $dest = Join-Path $root "ud.ud-lang-1.0.0"
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            Copy-Item -Recurse -Force (Join-Path $vsSrc "*") $dest
+            Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $dest "make_vsix.py"), (Join-Path $dest "*.vsix")
+            Say "Copied the VS Code extension into $dest (restart VS Code to load it)"
+        }
     }
 }
 
